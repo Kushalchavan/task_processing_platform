@@ -1,0 +1,28 @@
+[project]
+name = "task-processing-platform"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Kushalchavan", email = "kushalchavan2002@gmail.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi[standard]>=0.162.2",
+    "psycopg[binary]>=3.3.8",
+    "pydantic>=2.14.3",
+    "redis>=8.1.0",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[project.scripts]
+task-processing-platform = "task_processing_platform:main"
+
+[build-system]
+requires = ["uv_build>=0.13.1,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
