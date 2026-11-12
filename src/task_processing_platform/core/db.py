@@ -1,16 +1,16 @@
 """Every SQL statement lives here, and nowhere else. The API and worker call these functions and never write SQL themselves. If we change the database later, only this file changes"""
 
 import psycopg
-from psycopg.rows import dict_row
+from psycopg import Connection
+from psycopg.rows import DictRow, dict_row
 from psycopg.types.json import Jsonb
 
 from src.task_processing_platform.core.config import DATABASE_URL
 
 
-def _connect():
-    # `with _connect() as conn:` commits on success, rolls back on error, then closes.
-    # One connection per call is simple but slow; a connection pool comes in a later phase.
-    return psycopg.connect(DATABASE_URL, row_factory=dict_row)
+def _connect() -> Connection[DictRow]:
+    # Connection[DictRow] tells the type checker: rows come back as dicts
+    return Connection[DictRow].connect(DATABASE_URL, row_factory=dict_row)
 
 
 def create_task(task_id: str, task_type: str, payload: dict) -> None:
@@ -21,7 +21,7 @@ def create_task(task_id: str, task_type: str, payload: dict) -> None:
         )
 
 
-def get_task(task_id: str) -> dict | None:
+def get_task(task_id: str) -> DictRow | None:
     with _connect() as conn:
         return conn.execute("SELECT * FROM tasks WHERE id = %s", (task_id,)).fetchone()
 
