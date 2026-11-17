@@ -1,14 +1,21 @@
-from job import create_job as build_job
+from job import Job, JobStatus, create_job as build_job
+
+ALLOWED_TRANSITIONS = {
+    JobStatus.PENDING: {JobStatus.PROCESSING},
+    JobStatus.PROCESSING: {JobStatus.COMPLETED, JobStatus.FAILED},
+    JobStatus.COMPLETED: set(),
+    JobStatus.FAILED: set(),
+}
 
 
 class JobManager:
     def __init__(self) -> None:
-        self.jobs = {}
+        self.jobs: dict[str, Job] = {}
 
     def create_job(self, task_type, payload):
         job = build_job(task_type, payload)
 
-        self.jobs[job["id"]] = job
+        self.jobs[job.id] = job
         return job
 
     def get_job(self, job_id):
@@ -21,14 +28,18 @@ class JobManager:
         job = self.get_job(job_id)
 
         if job is None:
-            raise KeyError(f"Job not found", {job_id})
+            raise KeyError(f"Job not found: {job_id}")
 
-        valid_statuses = {"pending", "processing", "completed", "failed"}
+        try:
+            status = JobStatus(status)
+        except ValueError:
+            raise ValueError(f"Invalid job status : {status}") from None
 
-        if status not in valid_statuses:
-            raise ValueError(f"Invalid job status", {status})
+        allowed = ALLOWED_TRANSITIONS[job.status]
 
-        job["status"] = status
+        if status not in allowed:
+            raise ValueError(f"Cannot transition job from " f"{job.status.value} to {status.value}")
+
+        job.status = status
 
         return job
-
