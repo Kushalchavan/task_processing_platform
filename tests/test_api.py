@@ -1,22 +1,21 @@
 import pytest
 
-from job_manager import JobManager
 from fastapi.testclient import TestClient
-
+from app.repositories.job_repository import JobRepository
+from app.services.job_service import JobService
 from main import app, get_job_service
 
 
 @pytest.fixture
 def client():
-    # setup
-    test_manager = JobManager()
-    app.dependency_overrides[get_job_service] = lambda: test_manager
+    repository = JobRepository()
+    service = JobService(repository)
+
+    app.dependency_overrides[get_job_service] = lambda: service
 
     with TestClient(app) as test_client:
-        # give client to the test
         yield test_client
 
-    # teardown
     app.dependency_overrides.clear()
 
 
