@@ -1,0 +1,11 @@
+from typing import Protocol
+from job import Job
+
+
+class JobRepositoryInterface(Protocol):
+
+    def create(self, job: Job) -> Job: ...
+
+    def get_by_id(self, job_id: str) -> Job | None: ...
+
+    def get_all(self) -> list[Job]: ...
