@@ -15,3 +15,7 @@ class JobRepository:
 
     def get_all(self) -> list[Job]:
         return list(self.jobs.values())
+
+    def save(self, job: Job) -> Job:
+        self.jobs[job.id] = job
+        return job

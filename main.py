@@ -1,14 +1,16 @@
 from fastapi import FastAPI, HTTPException, Depends
 
-from app.repositories.job_repository import JobRepository
+from app.database.dependencies import get_db
+from app.repositories.postgres_job_repository import PostgresJobRepository
+from sqlalchemy.orm import Session
 from app.services.job_service import JobService
 from schema import CreateJob, JobResponse
 
 app = FastAPI()
 
 
-def get_job_service():
-    repository = JobRepository()
+def get_job_service(db: Session = Depends(get_db)):
+    repository = PostgresJobRepository(db)
     return JobService(repository)
 
 

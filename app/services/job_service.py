@@ -27,4 +27,4 @@ class JobService:
 
         job.update_status(status)
 
-        return job
+        return self.job_repository.save(job)
