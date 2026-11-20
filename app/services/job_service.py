@@ -11,7 +11,15 @@ class JobService:
 
     def create_job(self, task_type: str, payload: dict[str, Any]):
         job = create_job(task_type, payload)
-        return self.job_repository.create(job)
+
+        try:
+            created_job = self.job_repository.create(job)
+            self.job_repository.commit()
+            return created_job
+
+        except Exception:
+            self.job_repository.rollback()
+            raise
 
     def get_job(self, job_id: str):
         return self.job_repository.get_by_id(job_id)
@@ -20,11 +28,36 @@ class JobService:
         return self.job_repository.get_all()
 
     def update_job_status(self, job_id: str, status: JobStatus | str):
-        job = self.job_repository.get_by_id(job_id)
+        try:
+            job = self.job_repository.get_by_id(job_id)
 
-        if job is None:
-            raise KeyError(f"Job not found: {job_id}")
+            if job is None:
+                raise KeyError(f"Job not found: {job_id}")
 
-        job.update_status(status)
+            job.update_status(status)
 
-        return self.job_repository.save(job)
+            updated_job = self.job_repository.save(job)
+
+            self.job_repository.commit()
+
+            return updated_job
+
+        except Exception:
+            self.job_repository.rollback()
+            raise
+
+    def claim_next_job(self):
+        try:
+            job = self.job_repository.claim_next_job()
+
+            if job is None:
+                self.job_repository.commit()
+                return None
+
+            self.job_repository.commit()
+
+            return job
+
+        except Exception:
+            self.job_repository.rollback()
+            raise

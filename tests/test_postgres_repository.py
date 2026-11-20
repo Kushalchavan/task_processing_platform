@@ -123,3 +123,23 @@ def test_claim_next_job_returns_none_when_no_pending_jobs(db_session):
 
     # 4. Assert the result is None
     assert claimed_job is None
+
+
+def test_create_job_rollback(db_session):
+    repository = PostgresJobRepository(db_session)
+
+    job = create_job(
+        task_type="send_email",
+        payload={"email": "rollback@example.com"},
+    )
+
+    # Insert the job without committing.
+    repository.create(job)
+
+    # Roll back the transaction.
+    repository.rollback()
+
+    # The job should no longer exist.
+    retrieved_job = repository.get_by_id(job.id)
+
+    assert retrieved_job is None

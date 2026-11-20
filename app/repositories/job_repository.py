@@ -19,3 +19,9 @@ class JobRepository:
     def save(self, job: Job) -> Job:
         self.jobs[job.id] = job
         return job
+
+    def commit(self) -> None:
+        pass
+
+    def rollback(self) -> None:
+        pass

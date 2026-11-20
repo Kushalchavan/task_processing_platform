@@ -19,8 +19,7 @@ class PostgresJobRepository:
         )
 
         self.db.add(job_model)
-        self.db.commit()
-        self.db.refresh(job_model)
+        self.db.flush()
 
         return job
 
@@ -63,38 +62,37 @@ class PostgresJobRepository:
         job_model.status = job.status.value
         job_model.attempts = job.attempts
 
-        self.db.commit()
-        self.db.refresh(job_model)
+        self.db.flush()
 
         return job
 
     def claim_next_job(self) -> Job | None:
-        try:
-            job_model = (
-                self.db.query(JobModel)
-                .filter(JobModel.status == JobStatus.PENDING.value)
-                .order_by(JobModel.id)
-                .with_for_update(skip_locked=True)
-                .first()
-            )
+        job_model = (
+            self.db.query(JobModel)
+            .filter(JobModel.status == JobStatus.PENDING.value)
+            .order_by(JobModel.id)
+            .with_for_update(skip_locked=True)
+            .first()
+        )
 
-            if job_model is None:
-                return None
+        if job_model is None:
+            return None
 
-            job_model.status = JobStatus.PROCESSING.value
-            job_model.attempts += 1
+        job_model.status = JobStatus.PROCESSING.value
+        job_model.attempts += 1
 
-            self.db.commit()
-            self.db.refresh(job_model)
+        self.db.flush()
 
-            return Job(
-                id=job_model.id,
-                task_type=job_model.task_type,
-                payload=job_model.payload,
-                status=JobStatus(job_model.status),
-                attempts=job_model.attempts,
-            )
+        return Job(
+            id=job_model.id,
+            task_type=job_model.task_type,
+            payload=job_model.payload,
+            status=JobStatus(job_model.status),
+            attempts=job_model.attempts,
+        )
 
-        except Exception:
-            self.db.rollback()
-            raise
+    def commit(self) -> None:
+        self.db.commit()
+
+    def rollback(self) -> None:
+        self.db.rollback()
