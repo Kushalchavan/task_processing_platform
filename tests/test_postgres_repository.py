@@ -1,6 +1,6 @@
 import pytest
 
-from job import create_job, JobStatus
+from job import create_job, JobStatus, Job
 from app.repositories.postgres_job_repository import PostgresJobRepository
 
 
@@ -94,7 +94,6 @@ def test_get_nonexistent_job(db_session):
     assert job is None
 
 
-
 def test_save_nonexistent_job(db_session):
     repository = PostgresJobRepository(db_session)
 
@@ -105,3 +104,22 @@ def test_save_nonexistent_job(db_session):
 
     with pytest.raises(KeyError, match="Job not found"):
         repository.save(job)
+
+
+def test_claim_next_job_returns_none_when_no_pending_jobs(db_session):
+    repository = PostgresJobRepository(db_session)
+
+    # 1. Create a job
+    job = Job(task_type="email", payload={"to": "test@example.com"})
+
+    repository.create(job)
+
+    # 2. Change its status to processing
+    job.update_status(JobStatus.PROCESSING)
+    repository.save(job)
+
+    # 3. Call claim_next_job()
+    claimed_job = repository.claim_next_job()
+
+    # 4. Assert the result is None
+    assert claimed_job is None

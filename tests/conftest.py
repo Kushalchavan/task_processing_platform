@@ -3,10 +3,9 @@ import pytest
 
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm import Session
 
 from app.database.base import Base
-from app.models.job_model import JobModel
 
 
 @pytest.fixture(scope="session")
@@ -19,6 +18,7 @@ def test_engine():
         raise RuntimeError("TEST_DATABASE_URL is not configured")
 
     engine = create_engine(test_database_url)
+    print("Connected test database:", engine.url.database)
 
     Base.metadata.create_all(bind=engine)
 

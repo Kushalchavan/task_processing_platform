@@ -67,3 +67,34 @@ class PostgresJobRepository:
         self.db.refresh(job_model)
 
         return job
+
+    def claim_next_job(self) -> Job | None:
+        try:
+            job_model = (
+                self.db.query(JobModel)
+                .filter(JobModel.status == JobStatus.PENDING.value)
+                .order_by(JobModel.id)
+                .with_for_update(skip_locked=True)
+                .first()
+            )
+
+            if job_model is None:
+                return None
+
+            job_model.status = JobStatus.PROCESSING.value
+            job_model.attempts += 1
+
+            self.db.commit()
+            self.db.refresh(job_model)
+
+            return Job(
+                id=job_model.id,
+                task_type=job_model.task_type,
+                payload=job_model.payload,
+                status=JobStatus(job_model.status),
+                attempts=job_model.attempts,
+            )
+
+        except Exception:
+            self.db.rollback()
+            raise
