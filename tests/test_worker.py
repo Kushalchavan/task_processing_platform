@@ -2,6 +2,7 @@ from unittest.mock import Mock
 
 from job import Job, JobStatus
 from app.workers.worker import Worker
+from unittest.mock import Mock
 
 
 def test_process_one_job_returns_false_when_no_job():
@@ -73,3 +74,41 @@ def test_process_one_job_marks_failed_when_handler_raises_error():
         job.id,
         JobStatus.FAILED,
     )
+
+
+def test_worker_stops_when_shutdown_requested():
+    job_service = Mock()
+    task_registry = Mock()
+
+    worker = Worker(job_service, task_registry)
+
+    worker.shutdown_event.set()
+    worker.run()
+
+    job_service.claim_next_job.assert_not_called()
+
+
+def test_worker_wakes_up_when_shutdown_requested():
+    job_service = Mock()
+    task_registry = Mock()
+
+    job_service.claim_next_job.return_value = None
+
+    worker = Worker(job_service, task_registry)
+
+    # A separate thread requests shutdown while the worker is waiting.
+    import threading
+
+    shutdown_thread = threading.Thread(
+        target=lambda: (
+            worker.shutdown_event.wait(timeout=0.1),
+            worker.shutdown_event.set(),
+        )
+    )
+
+    shutdown_thread.start()
+    worker.run(poll_interval=0.01)
+    shutdown_thread.join(timeout=1)
+
+    assert not shutdown_thread.is_alive()
+    assert job_service.claim_next_job.call_count >= 1
