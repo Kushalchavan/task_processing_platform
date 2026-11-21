@@ -1,6 +1,6 @@
 from typing import Any
 
-from job import create_job, JobStatus
+from app.domain.job import create_job, JobStatus
 from app.repositories.job_repository_interface import JobRepositoryInterface
 
 

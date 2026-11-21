@@ -1,5 +1,5 @@
 from typing import Protocol
-from job import Job
+from app.domain.job import Job
 
 
 class JobRepositoryInterface(Protocol):

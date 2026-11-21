@@ -1,6 +1,6 @@
 from app.repositories.job_repository import JobRepository
 from app.services.job_service import JobService
-from job import JobStatus
+from app.domain.job import JobStatus
 
 
 def test_create_job():

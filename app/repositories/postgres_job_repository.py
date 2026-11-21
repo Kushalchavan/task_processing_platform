@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
 
-from job import Job, JobStatus
+from app.domain.job import Job, JobStatus
 from app.models.job_model import JobModel
 
 

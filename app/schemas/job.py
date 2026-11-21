@@ -1,6 +1,5 @@
 from pydantic import BaseModel, Field
 from typing import Any
-from enum import Enum
 
 class CreateJob(BaseModel):
     task_type: str = Field(min_length = 1)

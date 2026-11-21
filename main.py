@@ -4,7 +4,7 @@ from app.database.dependencies import get_db
 from app.repositories.postgres_job_repository import PostgresJobRepository
 from sqlalchemy.orm import Session
 from app.services.job_service import JobService
-from schema import CreateJob, JobResponse
+from app.schemas.job import CreateJob, JobResponse
 
 app = FastAPI()
 

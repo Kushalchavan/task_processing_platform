@@ -1,6 +1,6 @@
 import pytest
 
-from job import create_job, JobStatus, Job
+from app.domain.job import create_job, JobStatus, Job
 from app.repositories.postgres_job_repository import PostgresJobRepository
 
 

@@ -1,6 +1,6 @@
 from unittest.mock import Mock
 
-from job import Job, JobStatus
+from app.domain.job import Job, JobStatus
 from app.workers.worker import Worker
 from unittest.mock import Mock
 

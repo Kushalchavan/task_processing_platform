@@ -1,4 +1,4 @@
-from job import Job
+from app.domain.job import Job, JobStatus
 
 
 class JobRepository:
@@ -19,6 +19,15 @@ class JobRepository:
     def save(self, job: Job) -> Job:
         self.jobs[job.id] = job
         return job
+
+    def claim_next_job(self) -> Job | None:
+        for job in self.jobs.values():
+            if job.status == JobStatus.PENDING:
+                job.update_status(JobStatus.PROCESSING)
+                job.attempts += 1
+                return job
+
+        return None
 
     def commit(self) -> None:
         pass

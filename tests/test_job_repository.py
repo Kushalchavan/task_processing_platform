@@ -1,4 +1,4 @@
-from job import Job
+from app.domain.job import Job
 from app.repositories.job_repository import JobRepository
 
 

@@ -4,7 +4,7 @@ import threading
 
 from app.services.job_service import JobService
 from app.workers.task_registry import TaskHandlerRegistry
-from job import JobStatus
+from app.domain.job import JobStatus
 
 logger = logging.getLogger(__name__)
 

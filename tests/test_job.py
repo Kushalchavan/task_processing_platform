@@ -1,4 +1,4 @@
-from job import create_job
+from app.domain.job import create_job
 
 
 def test_create_job():

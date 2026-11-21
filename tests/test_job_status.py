@@ -1,4 +1,4 @@
-from job import Job, JobStatus
+from app.domain.job import Job, JobStatus
 
 
 def test_pending_to_processing():

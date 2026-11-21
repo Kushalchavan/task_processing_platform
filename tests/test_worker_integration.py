@@ -3,7 +3,7 @@ from app.services.job_service import JobService
 from app.workers.task_registry import TaskHandlerRegistry
 from app.workers.task_handlers import handle_print_message
 from app.workers.worker import Worker
-from job import JobStatus
+from app.domain.job import JobStatus
 
 
 def test_worker_processes_postgres_job(db_session):
