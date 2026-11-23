@@ -1,10 +1,10 @@
 import logging
-import time
 import threading
 
 from app.services.job_service import JobService
 from app.workers.task_registry import TaskHandlerRegistry
 from app.domain.job import JobStatus
+from app.queue.redis_stream import RedisStream
 
 logger = logging.getLogger(__name__)
 
@@ -14,46 +14,62 @@ class Worker:
         self,
         job_service: JobService,
         task_registry: TaskHandlerRegistry,
+        redis_stream: RedisStream,
+        consumer_name: str,
     ) -> None:
         self.job_service = job_service
         self.task_registry = task_registry
+        self.redis_stream = redis_stream
+        self.consumer_name = consumer_name
         self.shutdown_event = threading.Event()
 
     def process_one_job(self) -> bool:
-        job = self.job_service.claim_next_job()
+        message = self.redis_stream.consume_one(self.consumer_name)
+
+        if message is None:
+            return False
+
+        message_id = message["message_id"]
+        job_id = message["job_id"]
+
+        # Claim the exact job referenced by the Redis message.
+        job = self.job_service.claim_job(job_id)
 
         if job is None:
-            return False
+            logger.warning("Could not claim job: %s", job_id)
+            # Leave the message pending for investigation/recovery.
+            return True
 
         try:
             handler = self.task_registry.get_handler(job.task_type)
-
             handler(job.payload)
 
+        except Exception:
+            logger.exception("Job execution failed: %s", job.id)
+
+            # Acknowledge only after the failure status is saved.
+            self.job_service.update_job_status(
+                job.id,
+                JobStatus.FAILED,
+            )
+
+        else:
+            # Acknowledge only after the completion status is saved.
             self.job_service.update_job_status(
                 job.id,
                 JobStatus.COMPLETED,
             )
 
-            return True
+        self.redis_stream.acknowledge_job(message_id)
+        return True
 
-        except Exception:
-            logger.exception("Job execution failed: %s", job.id)
-
-            self.job_service.update_job_status(
-                job.id,
-                JobStatus.FAILED,
-            )
-            return True
-
-    def run(self, poll_interval: float = 2.0) -> None:
-        logger.info("Worker started")
+    def run(self) -> None:
+        logger.info("Worker started: %s", self.consumer_name)
 
         while not self.shutdown_event.is_set():
-            job_processed = self.process_one_job()
+            try:
+                self.process_one_job()
+            except Exception:
+                logger.exception("Unexpected worker error")
 
-            if not job_processed:
-                # Wait for new work oa a shutdown signal
-                self.shutdown_event.wait(timeout=poll_interval)
-
-        logger.info("Worker stopped")
+        logger.info("Worker stopped: %s", self.consumer_name)

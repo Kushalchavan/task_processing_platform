@@ -96,3 +96,30 @@ class PostgresJobRepository:
 
     def rollback(self) -> None:
         self.db.rollback()
+
+    def claim_job(self, job_id: str) -> Job | None:
+        job_model = (
+            self.db.query(JobModel)
+            .filter(
+                JobModel.id == job_id,
+                JobModel.status == JobStatus.PENDING.value,
+            )
+            .with_for_update(skip_locked=True)
+            .first()
+        )
+
+        if job_model is None:
+            return None
+
+        job_model.status = JobStatus.PROCESSING.value
+        job_model.attempts += 1
+
+        self.db.flush()
+
+        return Job(
+            id=job_model.id,
+            task_type=job_model.task_type,
+            payload=job_model.payload,
+            status=JobStatus(job_model.status),
+            attempts=job_model.attempts,
+        )

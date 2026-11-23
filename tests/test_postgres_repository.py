@@ -143,3 +143,94 @@ def test_create_job_rollback(db_session):
     retrieved_job = repository.get_by_id(job.id)
 
     assert retrieved_job is None
+
+
+def test_claim_job_returns_processing_job(db_session):
+    repository = PostgresJobRepository(db_session)
+
+    job = Job(
+        task_type="print_message",
+        payload={"message": "Hello Nexus"},
+    )
+
+    repository.create(job)
+    repository.commit()
+
+    claimed_job = repository.claim_job(job.id)
+
+    assert claimed_job is not None
+    assert claimed_job.id == job.id
+    assert claimed_job.status == JobStatus.PROCESSING
+    assert claimed_job.attempts == 1
+
+
+def test_claim_unknown_job_returns_none(db_session):
+    repository = PostgresJobRepository(db_session)
+
+    claimed_job = repository.claim_job("non-existent-job")
+
+    assert claimed_job is None
+
+
+def test_claim_processing_job_returns_none(db_session):
+    repository = PostgresJobRepository(db_session)
+
+    job = Job(
+        task_type="print_message",
+        payload={"message": "Hello"},
+    )
+
+    repository.create(job)
+    repository.commit()
+
+    job.update_status(JobStatus.PROCESSING)
+    repository.save(job)
+    repository.commit()
+
+    claimed_job = repository.claim_job(job.id)
+
+    assert claimed_job is None
+
+
+def test_claim_completed_job_returns_none(db_session):
+    repository = PostgresJobRepository(db_session)
+
+    job = Job(
+        task_type="print_message",
+        payload={"message": "Hello"},
+    )
+
+    repository.create(job)
+    repository.commit()
+
+    job.update_status(JobStatus.PROCESSING)
+    job.update_status(JobStatus.COMPLETED)
+
+    repository.save(job)
+    repository.commit()
+
+    claimed_job = repository.claim_job(job.id)
+
+    assert claimed_job is None
+
+
+def test_claim_job_twice_returns_none_on_second_attempt(db_session):
+    repository = PostgresJobRepository(db_session)
+
+    job = Job(
+        task_type="print_message",
+        payload={"message": "Hello"},
+    )
+
+    repository.create(job)
+    repository.commit()
+
+    first_claim = repository.claim_job(job.id)
+    repository.commit()
+
+    second_claim = repository.claim_job(job.id)
+
+    assert first_claim is not None
+    assert first_claim.status == JobStatus.PROCESSING
+
+    assert second_claim is None

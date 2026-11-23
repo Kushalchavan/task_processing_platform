@@ -15,6 +15,9 @@ if not REDIS_URL:
 redis_client = Redis.from_url(
     REDIS_URL,
     decode_responses=True,
+    socket_timeout=None,
+    socket_connect_timeout=5,
+    health_check_interval=30,
 )
 
 

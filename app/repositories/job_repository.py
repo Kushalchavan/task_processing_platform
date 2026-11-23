@@ -34,3 +34,17 @@ class JobRepository:
 
     def rollback(self) -> None:
         pass
+
+    def claim_job(self, job_id: str) -> Job | None:
+        job = self.jobs.get(job_id)
+
+        if job is None:
+            return None
+
+        if job.status != JobStatus.PENDING:
+            return None
+
+        job.update_status(JobStatus.PROCESSING)
+        job.attempts += 1
+
+        return job

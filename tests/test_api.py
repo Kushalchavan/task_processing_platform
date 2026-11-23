@@ -1,5 +1,8 @@
 import pytest
 
+from unittest.mock import Mock
+from app.queue.redis_stream import RedisStream
+
 from fastapi.testclient import TestClient
 from app.repositories.job_repository import JobRepository
 from app.services.job_service import JobService
@@ -9,7 +12,8 @@ from main import app, get_job_service
 @pytest.fixture
 def client():
     repository = JobRepository()
-    service = JobService(repository)
+    redis_stream = Mock(spec=RedisStream)
+    service = JobService(repository, redis_stream)
 
     app.dependency_overrides[get_job_service] = lambda: service
 
