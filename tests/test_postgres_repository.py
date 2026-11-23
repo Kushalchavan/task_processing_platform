@@ -1,5 +1,7 @@
 import pytest
 
+from datetime import datetime, timezone
+
 from app.domain.job import create_job, JobStatus, Job
 from app.repositories.postgres_job_repository import PostgresJobRepository
 
@@ -234,3 +236,37 @@ def test_claim_job_twice_returns_none_on_second_attempt(db_session):
     assert first_claim.status == JobStatus.PROCESSING
 
     assert second_claim is None
+
+
+def test_retry_fields_are_persisted_and_retrieved(db_session):
+    repository = PostgresJobRepository(db_session)
+
+    retry_at = datetime.now(timezone.utc)
+
+    job = Job(
+        task_type="send_email",
+        payload={"email": "test@example.com"},
+        max_attempts=5,
+    )
+
+    repository.create(job)
+
+    job.update_status(JobStatus.PROCESSING)
+    job.attempts = 1
+
+    job.schedule_retry(
+        error="Connection timeout",
+        retry_at=retry_at,
+    )
+
+    repository.save(job)
+    repository.commit()
+
+    retrieved_job = repository.get_by_id(job.id)
+
+    assert retrieved_job is not None
+    assert retrieved_job.max_attempts == 5
+    assert retrieved_job.attempts == 1
+    assert retrieved_job.status == JobStatus.PENDING
+    assert retrieved_job.next_retry_at == retry_at
+    assert retrieved_job.last_error == "Connection timeout"

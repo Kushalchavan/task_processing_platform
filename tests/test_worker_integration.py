@@ -1,5 +1,5 @@
 from unittest.mock import Mock
-from app.queue.redis_stream import RedisStream
+from app.queue.redis_stream import RedisStream, STREAM_NAME
 
 from app.repositories.postgres_job_repository import PostgresJobRepository
 from app.services.job_service import JobService
@@ -93,3 +93,48 @@ def test_worker_marks_postgres_job_failed(db_session):
     assert updated_job.attempts == 1
 
     redis_stream.acknowledge_job.assert_called_once_with("123-0")
+
+
+def test_worker_recovers_abandoned_pending_message(db_session):
+    repository = PostgresJobRepository(db_session)
+
+    redis_stream = RedisStream()
+
+    # Start with a clean stream and create its consumer group.
+    redis_stream.redis.delete(STREAM_NAME)
+    redis_stream.create_consumer_group()
+
+    job_service = JobService(repository, redis_stream)
+
+    registry = TaskHandlerRegistry()
+    registry.register("print_message", handle_print_message)
+
+    job = job_service.create_job(
+        task_type="print_message",
+        payload={"message": "Recovered successfully!"},
+    )
+
+    # Worker A receives the message but crashes before processing it.
+    message = redis_stream.consume_one("worker-1")
+
+    assert message is not None
+    assert message["job_id"] == str(job.id)
+
+    # Worker B takes over the abandoned message.
+    worker_b = Worker(
+        job_service=job_service,
+        task_registry=registry,
+        redis_stream=redis_stream,
+        consumer_name="worker-2",
+        recovery_idle_time_ms=0,
+    )
+
+    result = worker_b.process_one_job()
+
+    assert result is True
+
+    updated_job = job_service.get_job(job.id)
+
+    assert updated_job is not None
+    assert updated_job.status == JobStatus.COMPLETED
+    assert updated_job.attempts == 1

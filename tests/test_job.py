@@ -1,18 +1,41 @@
-from app.domain.job import create_job
+from datetime import datetime, timezone
+
+from app.domain.job import Job, JobStatus
 
 
-def test_create_job():
-    job = create_job(task_type="send_email", payload={"email": "john@gmail.com"})
+def test_job_can_be_scheduled_for_retry():
+    job = Job(task_type="send_email", payload={})
+    job.update_status(JobStatus.PROCESSING)
+    job.attempts = 1
 
-    assert job.task_type == "send_email"
-    assert job.status == "pending"
-    assert job.attempts == 0
-    assert job.payload["email"] == "john@gmail.com"
-    assert job.id is not None
+    retry_at = datetime.now(timezone.utc)
+
+    result = job.schedule_retry("Connection timeout", retry_at)
+
+    assert result is True
+    assert job.status == JobStatus.PENDING
+    assert job.next_retry_at == retry_at
+    assert job.last_error == "Connection timeout"
 
 
-def test_each_job_has_unique_id():
-    job1 = create_job("send_email", {})
-    job2 = create_job("send_email", {})
+def test_job_fails_when_max_attempts_reached():
+    job = Job(task_type="send_email", payload={})
+    job.update_status(JobStatus.PROCESSING)
+    job.attempts = 3
 
-    assert job1.id != job2.id
+    retry_at = datetime.now(timezone.utc)
+
+    result = job.schedule_retry("Connection timeout", retry_at)
+
+    assert result is False
+    assert job.status == JobStatus.FAILED
+    assert job.next_retry_at is None
+    assert job.last_error == "Connection timeout"
+
+
+def test_job_rejects_zero_max_attempts():
+    try:
+        Job(task_type="send_email", payload={}, max_attempts=0)
+        assert False, "Expected ValueError"
+    except ValueError:
+        pass

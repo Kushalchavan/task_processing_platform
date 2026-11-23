@@ -16,12 +16,14 @@ class Worker:
         task_registry: TaskHandlerRegistry,
         redis_stream: RedisStream,
         consumer_name: str,
+        recovery_idle_time_ms: int = 60000
     ) -> None:
         self.job_service = job_service
         self.task_registry = task_registry
         self.redis_stream = redis_stream
         self.consumer_name = consumer_name
         self.shutdown_event = threading.Event()
+        self.recovery_idle_time_ms = recovery_idle_time_ms
 
     def process_one_job(self) -> bool:
         message = self.redis_stream.consume_one(self.consumer_name)
@@ -29,7 +31,7 @@ class Worker:
         if message is None:
             message = self.redis_stream.claim_one_pending(
                 consumer_name=self.consumer_name,
-                min_idle_time=60000,
+                min_idle_time=self.recovery_idle_time_ms,
             )
 
         if message is None:

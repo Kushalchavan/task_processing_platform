@@ -16,6 +16,7 @@ def create_worker():
         task_registry=task_registry,
         redis_stream=redis_stream,
         consumer_name="worker-test",
+        recovery_idle_time_ms=60000
     )
 
     return worker, job_service, task_registry, redis_stream

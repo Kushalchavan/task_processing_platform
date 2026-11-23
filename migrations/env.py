@@ -9,6 +9,7 @@ from alembic import context
 from dotenv import load_dotenv
 
 from app.database.base import Base
+from app.models.job_model import JobModel
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

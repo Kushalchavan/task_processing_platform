@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from typing import Any
 from uuid import uuid4
@@ -13,7 +14,11 @@ class JobStatus(str, Enum):
 
 ALLOWED_TRANSITIONS = {
     JobStatus.PENDING: {JobStatus.PROCESSING},
-    JobStatus.PROCESSING: {JobStatus.COMPLETED, JobStatus.FAILED},
+    JobStatus.PROCESSING: {
+        JobStatus.PENDING,
+        JobStatus.COMPLETED,
+        JobStatus.FAILED,
+    },
     JobStatus.COMPLETED: set(),
     JobStatus.FAILED: set(),
 }
@@ -26,6 +31,13 @@ class Job:
     id: str = field(default_factory=lambda: str(uuid4()))
     status: JobStatus = JobStatus.PENDING
     attempts: int = 0
+    max_attempts: int = 3
+    next_retry_at: datetime | None = None
+    last_error: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.max_attempts < 1:
+            raise ValueError("max_attempts must be at least 1")
 
     def update_status(self, status: JobStatus | str) -> None:
         try:
@@ -41,6 +53,22 @@ class Job:
             )
 
         self.status = status
+
+    def schedule_retry(
+        self,
+        error: str,
+        retry_at: datetime,
+    ) -> bool:
+        self.last_error = error
+
+        if self.attempts >= self.max_attempts:
+            self.update_status(JobStatus.FAILED)
+            self.next_retry_at = None
+            return False
+
+        self.update_status(JobStatus.PENDING)
+        self.next_retry_at = retry_at
+        return True
 
 
 def create_job(task_type: str, payload: dict[str, Any]) -> Job:
