@@ -1,12 +1,14 @@
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
-from app.queue.redis_stream import RedisStream, STREAM_NAME
 
+from app.queue.redis_stream import RedisStream, STREAM_NAME
 from app.repositories.postgres_job_repository import PostgresJobRepository
 from app.services.job_service import JobService
 from app.workers.task_registry import TaskHandlerRegistry
 from app.workers.task_handlers import handle_print_message
 from app.workers.worker import Worker
 from app.domain.job import JobStatus
+from app.queue.delayed_job_dispatcher import DelayedJobDispatcher
 
 
 def test_worker_processes_postgres_job(db_session):
@@ -143,3 +145,77 @@ def test_worker_recovers_abandoned_pending_message(db_session):
     assert updated_job is not None
     assert updated_job.status == JobStatus.COMPLETED
     assert updated_job.attempts == 1
+
+
+def test_worker_retries_failed_job_successfully(db_session):
+    repository = PostgresJobRepository(db_session)
+    redis_stream = RedisStream()
+
+    # Keep this test isolated from Redis data left by other tests.
+    redis_stream.redis.delete(STREAM_NAME)
+    redis_stream.redis.delete("nexus:delayed_jobs")
+    redis_stream.create_consumer_group()
+
+    job_service = JobService(repository, redis_stream)
+
+    registry = TaskHandlerRegistry()
+
+    execution_count = 0
+
+    def retry_handler(payload: dict) -> None:
+        nonlocal execution_count
+        execution_count += 1
+
+        # Simulate a temporary failure on the first attempt.
+        if execution_count == 1:
+            raise ValueError("Temporary failure")
+
+    registry.register("retry_task", retry_handler)
+
+    job = job_service.create_job(
+        task_type="retry_task",
+        payload={"message": "Retry me"},
+    )
+
+    worker = Worker(
+        job_service=job_service,
+        task_registry=registry,
+        redis_stream=redis_stream,
+        consumer_name="worker-test",
+    )
+
+    # First attempt: the handler fails and schedules a delayed retry.
+    assert worker.process_one_job() is True
+
+    updated_job = job_service.get_job(job.id)
+
+    assert updated_job is not None
+    assert updated_job.status == JobStatus.PENDING
+    assert updated_job.attempts == 1
+    assert updated_job.next_retry_at is not None
+
+    # Make the retry due immediately for this test.
+    redis_stream.schedule_delayed_job(
+        job_id=job.id,
+        retry_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+    )
+
+    # The dispatcher moves the due job into the Redis Stream.
+    dispatcher = DelayedJobDispatcher(
+        redis_stream=redis_stream,
+        poll_interval=0.1,
+        batch_size=10,
+    )
+
+    dispatched_count = dispatcher.dispatch_once()
+    assert dispatched_count == 1
+
+    # Second attempt: the handler succeeds.
+    assert worker.process_one_job() is True
+
+    completed_job = job_service.get_job(job.id)
+
+    assert completed_job is not None
+    assert completed_job.status == JobStatus.COMPLETED
+    assert completed_job.attempts == 2
+    assert execution_count == 2
