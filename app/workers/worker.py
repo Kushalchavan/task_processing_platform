@@ -27,6 +27,12 @@ class Worker:
         message = self.redis_stream.consume_one(self.consumer_name)
 
         if message is None:
+            message = self.redis_stream.claim_one_pending(
+                consumer_name=self.consumer_name,
+                min_idle_time=60000,
+            )
+
+        if message is None:
             return False
 
         message_id = message["message_id"]

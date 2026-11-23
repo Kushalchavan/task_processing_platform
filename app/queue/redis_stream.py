@@ -68,3 +68,43 @@ class RedisStream:
             "message_id": message_id,
             "job_id": job_id,
         }
+
+    def claim_pending_messages(
+        self,
+        consumer_name: str,
+        min_idle_time: int = 60000,
+        start_id: str = "0-0",
+        count: int = 10,
+    ) -> Any:
+        return self.redis.xautoclaim(
+            name=STREAM_NAME,
+            groupname=CONSUMER_GROUP,
+            consumername=consumer_name,
+            min_idle_time=min_idle_time,
+            start_id=start_id,
+            count=count,
+        )
+
+    def claim_one_pending(
+        self,
+        consumer_name: str,
+        min_idle_time: int = 60000,
+    ) -> dict[str, str] | None:
+        _, messages, _ = self.claim_pending_messages(
+            consumer_name=consumer_name,
+            min_idle_time=min_idle_time,
+        )
+
+        if not messages:
+            return None
+
+        message_id, data = messages[0]
+        job_id = data.get("job_id")
+
+        if not job_id:
+            raise ValueError("Redis message is missing job_id")
+
+        return {
+            "message_id": message_id,
+            "job_id": job_id,
+        }

@@ -25,11 +25,16 @@ def test_process_one_job_returns_false_when_no_message():
     worker, _, task_registry, redis_stream = create_worker()
 
     redis_stream.consume_one.return_value = None
+    redis_stream.claim_one_pending.return_value = None
 
     result = worker.process_one_job()
 
     assert result is False
-    task_registry.get_handler.assert_not_called()
+    redis_stream.consume_one.assert_called_once_with("worker-test")
+    redis_stream.claim_one_pending.assert_called_once_with(
+        consumer_name="worker-test",
+        min_idle_time=60000,
+    )
 
 
 def test_process_one_job_successfully():
