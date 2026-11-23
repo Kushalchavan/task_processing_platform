@@ -194,10 +194,18 @@ def test_worker_retries_failed_job_successfully(db_session):
     assert updated_job.attempts == 1
     assert updated_job.next_retry_at is not None
 
-    # Make the retry due immediately for this test.
+    # Make the retry due in both PostgreSQL and Redis.
+    retry_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+
+    # Update the retry timestamp in PostgreSQL.
+    updated_job.next_retry_at = retry_at
+    repository.save(updated_job)
+    repository.commit()
+
+    # Update the retry timestamp in Redis.
     redis_stream.schedule_delayed_job(
         job_id=job.id,
-        retry_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+        retry_at=retry_at,
     )
 
     # The dispatcher moves the due job into the Redis Stream.

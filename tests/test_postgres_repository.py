@@ -1,6 +1,6 @@
 import pytest
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from app.domain.job import create_job, JobStatus, Job
 from app.repositories.postgres_job_repository import PostgresJobRepository
@@ -270,3 +270,88 @@ def test_retry_fields_are_persisted_and_retrieved(db_session):
     assert retrieved_job.status == JobStatus.PENDING
     assert retrieved_job.next_retry_at == retry_at
     assert retrieved_job.last_error == "Connection timeout"
+
+
+def test_claim_job_returns_none_when_retry_is_not_due(db_session):
+    repository = PostgresJobRepository(db_session)
+
+    job = Job(
+        task_type="send_email",
+        payload={"email": "test@example.com"},
+    )
+
+    repository.create(job)
+
+    job.update_status(JobStatus.PROCESSING)
+    job.attempts = 1
+    job.schedule_retry(
+        error="Temporary failure",
+        retry_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+    )
+
+    repository.save(job)
+    repository.commit()
+
+    claimed_job = repository.claim_job(job.id)
+
+    assert claimed_job is None
+
+    unchanged_job = repository.get_by_id(job.id)
+
+    assert unchanged_job is not None
+    assert unchanged_job.status == JobStatus.PENDING
+    assert unchanged_job.attempts == 1
+    assert unchanged_job.next_retry_at is not None
+
+
+def test_claim_job_succeeds_when_retry_is_due(db_session):
+    repository = PostgresJobRepository(db_session)
+
+    job = Job(
+        task_type="send_email",
+        payload={"email": "test@example.com"},
+    )
+
+    repository.create(job)
+
+    job.update_status(JobStatus.PROCESSING)
+    job.attempts = 1
+    job.schedule_retry(
+        error="Temporary failure",
+        retry_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+    )
+
+    repository.save(job)
+    repository.commit()
+
+    claimed_job = repository.claim_job(job.id)
+
+    assert claimed_job is not None
+    assert claimed_job.status == JobStatus.PROCESSING
+    assert claimed_job.attempts == 2
+    assert claimed_job.next_retry_at is None
+
+
+def test_claim_next_job_skips_jobs_with_future_retry(db_session):
+    repository = PostgresJobRepository(db_session)
+
+    job = Job(
+        task_type="send_email",
+        payload={"email": "test@example.com"},
+    )
+
+    repository.create(job)
+
+    job.update_status(JobStatus.PROCESSING)
+    job.attempts = 1
+    job.schedule_retry(
+        error="Temporary failure",
+        retry_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+    )
+
+    repository.save(job)
+    repository.commit()
+
+    claimed_job = repository.claim_next_job()
+
+    assert claimed_job is None

@@ -25,6 +25,59 @@ class Worker:
         self.shutdown_event = threading.Event()
         self.recovery_idle_time_ms = recovery_idle_time_ms
 
+    def _handle_unclaimable_message(
+        self,
+        message_id: str,
+        job_id: str,
+    ) -> None:
+        # Check PostgreSQL to understand why the claim failed.
+        job = self.job_service.get_job(job_id)
+
+        if job is None:
+            logger.warning("Job does not exist: %s", job_id)
+            self.redis_stream.acknowledge_job(message_id)
+            return
+
+        if job.status in (JobStatus.COMPLETED, JobStatus.FAILED):
+            logger.info(
+                "Acknowledging stale message for terminal job: %s",
+                job_id,
+            )
+            self.redis_stream.acknowledge_job(message_id)
+            return
+
+        if job.status == JobStatus.PROCESSING:
+            logger.info(
+                "Job is already being processed: %s",
+                job_id,
+            )
+            self.redis_stream.acknowledge_job(message_id)
+            return
+
+        if job.status == JobStatus.PENDING and job.next_retry_at is not None:
+            # PostgreSQL is authoritative for the retry timestamp.
+            self.redis_stream.schedule_delayed_job(
+                job_id=job.id,
+                retry_at=job.next_retry_at,
+            )
+
+            # Acknowledge only after Redis has accepted the reschedule.
+            self.redis_stream.acknowledge_job(message_id)
+
+            logger.info(
+                "Premature message rescheduled for job %s at %s",
+                job.id,
+                job.next_retry_at,
+            )
+            return
+
+        # For other unexpected states, leave the message pending.
+        # Recovery can try again later.
+        logger.warning(
+            "Job %s could not be claimed; leaving message pending",
+            job_id,
+        )
+
     def process_one_job(self) -> bool:
         message = self.redis_stream.consume_one(self.consumer_name)
 
@@ -40,12 +93,13 @@ class Worker:
         message_id = message["message_id"]
         job_id = message["job_id"]
 
-        # Claim the exact job referenced by the Redis message.
         job = self.job_service.claim_job(job_id)
 
         if job is None:
-            logger.warning("Could not claim job: %s", job_id)
-            # Leave the message pending for investigation/recovery.
+            self._handle_unclaimable_message(
+                message_id=message_id,
+                job_id=job_id,
+            )
             return True
 
         try:
@@ -94,7 +148,6 @@ class Worker:
         # when applicable, the delayed retry is scheduled.
         self.redis_stream.acknowledge_job(message_id)
         return True
-
 
     def run(self) -> None:
         logger.info("Worker started: %s", self.consumer_name)

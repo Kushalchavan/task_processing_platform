@@ -1,4 +1,5 @@
 from sqlalchemy.orm import Session
+from sqlalchemy import func, or_
 
 from app.domain.job import Job, JobStatus
 from app.models.job_model import JobModel
@@ -73,7 +74,13 @@ class PostgresJobRepository:
     def claim_next_job(self) -> Job | None:
         job_model = (
             self.db.query(JobModel)
-            .filter(JobModel.status == JobStatus.PENDING.value)
+            .filter(
+                JobModel.status == JobStatus.PENDING.value,
+                or_(
+                    JobModel.next_retry_at.is_(None),
+                    JobModel.next_retry_at <= func.now(),
+                ),
+            )
             .order_by(JobModel.id)
             .with_for_update(skip_locked=True)
             .first()
@@ -85,6 +92,9 @@ class PostgresJobRepository:
         job_model.status = JobStatus.PROCESSING.value
         job_model.attempts += 1
 
+        # The retry is now being executed, so it is no longer scheduled.
+        job_model.next_retry_at = None
+
         self.db.flush()
 
         return self._to_domain(job_model)
@@ -95,6 +105,10 @@ class PostgresJobRepository:
             .filter(
                 JobModel.id == job_id,
                 JobModel.status == JobStatus.PENDING.value,
+                or_(
+                    JobModel.next_retry_at.is_(None),
+                    JobModel.next_retry_at <= func.now(),
+                ),
             )
             .with_for_update(skip_locked=True)
             .first()
@@ -105,6 +119,9 @@ class PostgresJobRepository:
 
         job_model.status = JobStatus.PROCESSING.value
         job_model.attempts += 1
+
+        # clear the scheduled retry timestamp once the job is claimed
+        job_model.next_retry_at = None
 
         self.db.flush()
 

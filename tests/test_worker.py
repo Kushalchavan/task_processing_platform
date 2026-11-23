@@ -1,4 +1,6 @@
 import threading
+import pytest
+
 from unittest.mock import Mock
 from datetime import datetime, timedelta, timezone
 
@@ -116,20 +118,22 @@ def test_process_one_job_schedules_retry_when_handler_fails():
     redis_stream.acknowledge_job.assert_called_once_with("123-0")
 
 
-def test_message_not_acknowledged_when_job_cannot_be_claimed():
-    worker, job_service, _, redis_stream = create_worker()
+def test_missing_job_message_is_acknowledged():
+    worker, job_service, task_registry, redis_stream = create_worker()
 
     redis_stream.consume_one.return_value = {
         "message_id": "123-0",
         "job_id": "missing-job",
     }
-
     job_service.claim_job.return_value = None
+    job_service.get_job.return_value = None
 
     result = worker.process_one_job()
 
     assert result is True
-    redis_stream.acknowledge_job.assert_not_called()
+    job_service.get_job.assert_called_once_with("missing-job")
+    redis_stream.acknowledge_job.assert_called_once_with("123-0")
+    task_registry.get_handler.assert_not_called()
 
 
 def test_worker_stops_when_shutdown_requested():
@@ -194,3 +198,99 @@ def test_process_one_job_does_not_schedule_retry_when_attempts_exhausted():
     job_service.schedule_job_retry.assert_called_once()
     redis_stream.schedule_delayed_job.assert_not_called()
     redis_stream.acknowledge_job.assert_called_once_with("123-0")
+
+
+def test_completed_job_message_is_acknowledged():
+    worker, job_service, task_registry, redis_stream = create_worker()
+
+    completed_job = Mock()
+    completed_job.id = "job-123"
+    completed_job.status = JobStatus.COMPLETED
+
+    redis_stream.consume_one.return_value = {
+        "message_id": "123-0",
+        "job_id": "job-123",
+    }
+    job_service.claim_job.return_value = None
+    job_service.get_job.return_value = completed_job
+
+    result = worker.process_one_job()
+
+    assert result is True
+    redis_stream.acknowledge_job.assert_called_once_with("123-0")
+    task_registry.get_handler.assert_not_called()
+
+
+def test_processing_job_duplicate_message_is_acknowledged():
+    worker, job_service, task_registry, redis_stream = create_worker()
+
+    processing_job = Mock()
+    processing_job.id = "job-123"
+    processing_job.status = JobStatus.PROCESSING
+
+    redis_stream.consume_one.return_value = {
+        "message_id": "123-0",
+        "job_id": "job-123",
+    }
+    job_service.claim_job.return_value = None
+    job_service.get_job.return_value = processing_job
+
+    result = worker.process_one_job()
+
+    assert result is True
+    redis_stream.acknowledge_job.assert_called_once_with("123-0")
+    task_registry.get_handler.assert_not_called()
+
+
+def test_future_retry_job_is_rescheduled_and_message_acknowledged():
+    worker, job_service, task_registry, redis_stream = create_worker()
+
+    retry_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+
+    pending_job = Mock()
+    pending_job.id = "job-123"
+    pending_job.status = JobStatus.PENDING
+    pending_job.next_retry_at = retry_at
+
+    redis_stream.consume_one.return_value = {
+        "message_id": "123-0",
+        "job_id": "job-123",
+    }
+    job_service.claim_job.return_value = None
+    job_service.get_job.return_value = pending_job
+
+    result = worker.process_one_job()
+
+    assert result is True
+    redis_stream.schedule_delayed_job.assert_called_once_with(
+        job_id="job-123",
+        retry_at=retry_at,
+    )
+    redis_stream.acknowledge_job.assert_called_once_with("123-0")
+    task_registry.get_handler.assert_not_called()
+
+
+def test_message_not_acknowledged_when_retry_scheduling_fails():
+    worker, job_service, task_registry, redis_stream = create_worker()
+
+    retry_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+
+    pending_job = Mock()
+    pending_job.id = "job-123"
+    pending_job.status = JobStatus.PENDING
+    pending_job.next_retry_at = retry_at
+
+    redis_stream.consume_one.return_value = {
+        "message_id": "123-0",
+        "job_id": "job-123",
+    }
+    job_service.claim_job.return_value = None
+    job_service.get_job.return_value = pending_job
+
+    redis_stream.schedule_delayed_job.side_effect = ConnectionError("Redis unavailable")
+
+    with pytest.raises(ConnectionError):
+        worker.process_one_job()
+
+    redis_stream.acknowledge_job.assert_not_called()
+    task_registry.get_handler.assert_not_called()
