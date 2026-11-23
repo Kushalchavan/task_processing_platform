@@ -187,3 +187,113 @@ def test_schedule_delayed_job_rejects_naive_datetime(redis_stream):
             "job-101",
             retry_at,
         )
+
+
+def test_dispatch_due_jobs_returns_zero_when_no_jobs_are_due(redis_stream):
+    now = datetime.now(timezone.utc)
+
+    # Schedule a job in the future.
+    redis_stream.schedule_delayed_job(
+        "job-future",
+        now + timedelta(seconds=30),
+    )
+
+    dispatched = redis_stream.dispatch_due_jobs(
+        current_time=now,
+    )
+
+    assert dispatched == 0
+
+
+def test_dispatch_due_job_publishes_to_stream(redis_stream):
+    now = datetime.now(timezone.utc)
+
+    redis_stream.schedule_delayed_job(
+        "job-101",
+        now - timedelta(seconds=5),
+    )
+
+    dispatched = redis_stream.dispatch_due_jobs(
+        current_time=now,
+    )
+
+    assert dispatched == 1
+
+    # Verify that the job was published to the Redis Stream.
+    messages = redis_stream.consume_job("worker-1")
+
+    assert len(messages) == 1
+
+    _, entries = messages[0]
+    _, data = entries[0]
+
+    assert data["job_id"] == "job-101"
+
+    # Verify that the dispatched job was removed from the Sorted Set.
+    assert (
+        redis_stream.redis.zscore(
+            DELAYED_JOBS_KEY,
+            "job-101",
+        )
+        is None
+    )
+
+
+def test_dispatch_multiple_due_jobs(redis_stream):
+    now = datetime.now(timezone.utc)
+
+    # Schedule three jobs that are already due.
+    for job_id, seconds_ago in [
+        ("job-101", 10),
+        ("job-102", 5),
+        ("job-103", 2),
+    ]:
+        redis_stream.schedule_delayed_job(
+            job_id,
+            now - timedelta(seconds=seconds_ago),
+        )
+
+    dispatched = redis_stream.dispatch_due_jobs(
+        current_time=now,
+    )
+
+    assert dispatched == 3
+
+    # All three jobs should now be available in the Stream.
+    messages = redis_stream.consume_job("worker-1")
+
+    assert len(messages) == 1
+
+    _, entries = messages[0]
+
+    assert len(entries) == 1
+
+    # Consume the remaining messages.
+    remaining = redis_stream.redis.xlen(STREAM_NAME)
+
+    assert remaining == 3
+
+    # All dispatched jobs should be removed from the Sorted Set.
+    assert redis_stream.redis.zcard(DELAYED_JOBS_KEY) == 0
+
+
+def test_dispatch_due_jobs_respects_batch_limit(redis_stream):
+    now = datetime.now(timezone.utc)
+
+    # Schedule three due jobs.
+    for job_id in ["job-101", "job-102", "job-103"]:
+        redis_stream.schedule_delayed_job(
+            job_id,
+            now - timedelta(seconds=5),
+        )
+
+    dispatched = redis_stream.dispatch_due_jobs(
+        current_time=now,
+        count=2,
+    )
+
+    assert dispatched == 2
+
+    # One job must remain scheduled for the next dispatcher cycle.
+    assert redis_stream.redis.zcard(DELAYED_JOBS_KEY) == 1
+    assert redis_stream.redis.xlen(STREAM_NAME) == 2

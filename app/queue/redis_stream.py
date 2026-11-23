@@ -158,3 +158,55 @@ class RedisStream:
         """Remove a job from the delayed-job Sorted Set."""
 
         return self.redis.zrem(DELAYED_JOBS_KEY, job_id)
+
+    def dispatch_due_jobs(
+        self,
+        current_time: datetime,
+        count: int = 100,
+    ) -> int:
+        """Atomically publish due jobs and remove them from the delayed set."""
+
+        if current_time.tzinfo is None or current_time.utcoffset() is None:
+            raise ValueError("current_time must be timezone-aware")
+
+        if count < 1:
+            raise ValueError("count must be at least 1")
+
+        # Redis executes this script atomically, preventing concurrent
+        # dispatchers from publishing the same scheduled entry.
+        script = """
+        local jobs = redis.call(
+            'ZRANGEBYSCORE',
+            KEYS[1],
+            '-inf',
+            ARGV[1],
+            'LIMIT',
+            0,
+            ARGV[2]
+        )
+
+        for _, job_id in ipairs(jobs) do
+            redis.call(
+                'XADD',
+                KEYS[2],
+                '*',
+                'job_id',
+                job_id
+            )
+
+            redis.call('ZREM', KEYS[1], job_id)
+        end
+
+        return #jobs
+        """
+
+        result = self.redis.eval(
+            script,
+            2,
+            DELAYED_JOBS_KEY,
+            STREAM_NAME,
+            current_time.timestamp(),
+            count,
+        )
+
+        return cast(int, result)

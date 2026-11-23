@@ -16,7 +16,7 @@ class Worker:
         task_registry: TaskHandlerRegistry,
         redis_stream: RedisStream,
         consumer_name: str,
-        recovery_idle_time_ms: int = 60000
+        recovery_idle_time_ms: int = 60000,
     ) -> None:
         self.job_service = job_service
         self.task_registry = task_registry
@@ -52,14 +52,36 @@ class Worker:
             handler = self.task_registry.get_handler(job.task_type)
             handler(job.payload)
 
-        except Exception:
+        except Exception as error:
             logger.exception("Job execution failed: %s", job.id)
 
-            # Acknowledge only after the failure status is saved.
-            self.job_service.update_job_status(
-                job.id,
-                JobStatus.FAILED,
+            # Let JobService decide whether another attempt is allowed
+            # and calculate the next retry time.
+            updated_job, should_retry = self.job_service.schedule_job_retry(
+                job_id=job.id,
+                error=str(error),
             )
+
+            if should_retry:
+                # Keep retries out of the main stream until their delay expires.
+                if updated_job.next_retry_at is None:
+                    raise ValueError(f"Retry time missing for job {job.id}")
+
+                self.redis_stream.schedule_delayed_job(
+                    job_id=updated_job.id,
+                    retry_at=updated_job.next_retry_at,
+                )
+
+                logger.info(
+                    "Job %s scheduled for retry at %s",
+                    job.id,
+                    updated_job.next_retry_at,
+                )
+            else:
+                logger.warning(
+                    "Job %s exhausted its retry attempts",
+                    job.id,
+                )
 
         else:
             # Acknowledge only after the completion status is saved.
@@ -68,8 +90,11 @@ class Worker:
                 JobStatus.COMPLETED,
             )
 
+        # Acknowledge only after the outcome is persisted and,
+        # when applicable, the delayed retry is scheduled.
         self.redis_stream.acknowledge_job(message_id)
         return True
+
 
     def run(self) -> None:
         logger.info("Worker started: %s", self.consumer_name)

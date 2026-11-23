@@ -53,7 +53,7 @@ def test_worker_processes_postgres_job(db_session):
     assert updated_job.attempts == 1
 
 
-def test_worker_marks_postgres_job_failed(db_session):
+def test_worker_schedules_retry_in_postgres_when_handler_fails(db_session):
     repository = PostgresJobRepository(db_session)
     redis_stream = Mock(spec=RedisStream)
     job_service = JobService(repository, redis_stream)
@@ -89,10 +89,15 @@ def test_worker_marks_postgres_job_failed(db_session):
     updated_job = job_service.get_job(job.id)
 
     assert updated_job is not None
-    assert updated_job.status == JobStatus.FAILED
+    assert updated_job.status == JobStatus.PENDING
     assert updated_job.attempts == 1
+    assert updated_job.next_retry_at is not None
+    assert updated_job.last_error == "Simulated task failure"
 
-    redis_stream.acknowledge_job.assert_called_once_with("123-0")
+    redis_stream.schedule_delayed_job.assert_called_once()
+
+    scheduled_job_id = redis_stream.schedule_delayed_job.call_args.kwargs["job_id"]
+    assert scheduled_job_id == job.id
 
 
 def test_worker_recovers_abandoned_pending_message(db_session):
