@@ -1,5 +1,7 @@
 from typing import Any
 
+from datetime import datetime, timedelta, timezone
+
 from app.domain.job import create_job, JobStatus
 from app.repositories.job_repository_interface import JobRepositoryInterface
 from app.queue.redis_stream import RedisStream
@@ -71,5 +73,41 @@ class JobService:
             return job
 
         except Exception:
+            self.job_repository.rollback()
+            raise
+
+    def schedule_job_retry(
+        self,
+        job_id: str,
+        error: str,
+        base_delay_seconds: int = 5,
+    ):
+        try:
+            job = self.job_repository.get_by_id(job_id)
+
+            if job is None:
+                raise KeyError(f"Job not found: {job_id}")
+
+            # Exponential backoff: increase the delay after each failed attampt.
+            # Ex: 5s, 10s, 20s, 40s
+            delay_seconds = base_delay_seconds * (2 ** (job.attempts - 1))
+
+            # Store the earliest time at which this job can be retried.
+            retry_at = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
+
+            # The domain decides wheather another attempss is allowed.
+            should_retry = job.schedule_retry(
+                error=error,
+                retry_at=retry_at,
+            )
+
+            # Persist the updated status, retry timestamp and erro details
+            updated_job = self.job_repository.save(job)
+            self.job_repository.commit()
+
+            return updated_job, should_retry
+
+        except Exception:
+            # Roll back the transaction if retrieving or updating the job fails.
             self.job_repository.rollback()
             raise

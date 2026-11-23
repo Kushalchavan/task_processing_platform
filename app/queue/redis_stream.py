@@ -1,9 +1,11 @@
 from typing import cast, Any
+from datetime import datetime
 
 from app.database.redis import redis_client
 
 STREAM_NAME = "nexus:jobs"
 CONSUMER_GROUP = "nexus-workers"
+DELAYED_JOBS_KEY = "nexus:delayed_jobs"
 
 
 class RedisStream:
@@ -108,3 +110,51 @@ class RedisStream:
             "message_id": message_id,
             "job_id": job_id,
         }
+
+    def schedule_delayed_job(
+        self,
+        job_id: str,
+        retry_at: datetime,
+    ) -> int:
+        """Store a job in Redis until its scheduled retry time."""
+
+        # Require timezone-aware timestamps to avoid ambiguous scheduling.
+        if retry_at.tzinfo is None or retry_at.utcoffset() is None:
+            raise ValueError("retry_at must be timezone-aware")
+
+        # Redis Sorted Sets use numerical scores, so convert the
+        # scheduled datetime into a Unix timestamp.
+        retry_timestamp = retry_at.timestamp()
+
+        return cast(int, self.redis.zadd(DELAYED_JOBS_KEY, {job_id: retry_timestamp}))
+
+    def get_due_delayed_jobs(
+        self,
+        current_time: datetime,
+        count: int = 100,
+    ) -> list[str]:
+        """Return jobs whose scheduled execution time has arrived."""
+
+        if current_time.tzinfo is None or current_time.utcoffset() is None:
+            raise ValueError("current_time must be timezone-aware")
+
+        if count < 1:
+            raise ValueError("count must be at least 1")
+
+        current_timestamp = current_time.timestamp()
+
+        # Only retrieve jobs with scores less than or equal to now.
+        job_ids = self.redis.zrangebyscore(
+            DELAYED_JOBS_KEY,
+            min="-inf",
+            max=current_timestamp,
+            start=0,
+            num=count,
+        )
+
+        return cast(list[str], job_ids)
+
+    def remove_delayed_job(self, job_id: str) -> int:
+        """Remove a job from the delayed-job Sorted Set."""
+
+        return self.redis.zrem(DELAYED_JOBS_KEY, job_id)
