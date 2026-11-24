@@ -66,7 +66,7 @@ def test_two_workers_claim_different_jobs(test_engine):
 
         with Session(test_engine) as db:
             repository = PostgresJobRepository(db)
-            return repository.claim_next_job()
+            return repository.claim_next_job(worker_id="worker-2")
 
     try:
         with ThreadPoolExecutor(max_workers=2) as executor:

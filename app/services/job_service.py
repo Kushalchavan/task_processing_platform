@@ -2,7 +2,7 @@ from typing import Any
 
 from datetime import datetime, timedelta, timezone
 
-from app.domain.job import create_job, JobStatus
+from app.domain.job import create_job, JobStatus, Job
 from app.repositories.job_repository_interface import JobRepositoryInterface
 from app.queue.redis_stream import RedisStream
 
@@ -56,9 +56,16 @@ class JobService:
             self.job_repository.rollback()
             raise
 
-    def claim_next_job(self):
+    def claim_next_job(
+        self,
+        worker_id: str,
+        lease_duration_seconds: int = 60,
+    ) -> Job | None:
         try:
-            job = self.job_repository.claim_next_job()
+            job = self.job_repository.claim_next_job(
+                worker_id=worker_id,
+                lease_duration_seconds=lease_duration_seconds,
+            )
             self.job_repository.commit()
             return job
 
@@ -66,12 +73,20 @@ class JobService:
             self.job_repository.rollback()
             raise
 
-    def claim_job(self, job_id: str):
+    def claim_job(
+        self,
+        job_id: str,
+        worker_id: str,
+        lease_duration_seconds: int = 60,
+    ) -> Job | None:
         try:
-            job = self.job_repository.claim_job(job_id)
+            job = self.job_repository.claim_job(
+                job_id=job_id,
+                worker_id=worker_id,
+                lease_duration_seconds=lease_duration_seconds,
+            )
             self.job_repository.commit()
             return job
-
         except Exception:
             self.job_repository.rollback()
             raise
@@ -109,5 +124,25 @@ class JobService:
 
         except Exception:
             # Roll back the transaction if retrieving or updating the job fails.
+            self.job_repository.rollback()
+            raise
+
+    def recover_expired_jobs(
+        self,
+        worker_id: str,
+        lease_duration_seconds: int = 60,
+        batch_size: int = 10,
+    ) -> list[Job]:
+        try:
+            recovered_jobs = self.job_repository.recover_expired_jobs(
+                worker_id=worker_id,
+                lease_duration_seconds=lease_duration_seconds,
+                batch_size=batch_size,
+            )
+
+            self.job_repository.commit()
+            return recovered_jobs
+
+        except Exception:
             self.job_repository.rollback()
             raise

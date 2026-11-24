@@ -4,6 +4,7 @@ from datetime import datetime, timezone, timedelta
 
 from app.domain.job import create_job, JobStatus, Job
 from app.repositories.postgres_job_repository import PostgresJobRepository
+from app.models.job_model import JobModel
 
 
 def test_create_job(db_session):
@@ -121,7 +122,7 @@ def test_claim_next_job_returns_none_when_no_pending_jobs(db_session):
     repository.save(job)
 
     # 3. Call claim_next_job()
-    claimed_job = repository.claim_next_job()
+    claimed_job = repository.claim_next_job(worker_id="worker-2")
 
     # 4. Assert the result is None
     assert claimed_job is None
@@ -158,18 +159,24 @@ def test_claim_job_returns_processing_job(db_session):
     repository.create(job)
     repository.commit()
 
-    claimed_job = repository.claim_job(job.id)
+    claimed_job = repository.claim_job(job_id=job.id, worker_id="worker-1")
 
     assert claimed_job is not None
     assert claimed_job.id == job.id
     assert claimed_job.status == JobStatus.PROCESSING
     assert claimed_job.attempts == 1
 
+    # Verify lease ownership.
+    assert claimed_job.lease_owner == "worker-1"
+    assert claimed_job.lease_expires_at is not None
+    assert claimed_job.lease_expires_at > datetime.now(timezone.utc)
+    assert claimed_job.lease_version == 1
+
 
 def test_claim_unknown_job_returns_none(db_session):
     repository = PostgresJobRepository(db_session)
 
-    claimed_job = repository.claim_job("non-existent-job")
+    claimed_job = repository.claim_job(job_id="non-existent-job", worker_id="worker-1")
 
     assert claimed_job is None
 
@@ -189,7 +196,7 @@ def test_claim_processing_job_returns_none(db_session):
     repository.save(job)
     repository.commit()
 
-    claimed_job = repository.claim_job(job.id)
+    claimed_job = repository.claim_job(job_id=job.id, worker_id="worker-1")
 
     assert claimed_job is None
 
@@ -211,7 +218,7 @@ def test_claim_completed_job_returns_none(db_session):
     repository.save(job)
     repository.commit()
 
-    claimed_job = repository.claim_job(job.id)
+    claimed_job = repository.claim_job(job_id=job.id, worker_id="worker-1")
 
     assert claimed_job is None
 
@@ -227,10 +234,10 @@ def test_claim_job_twice_returns_none_on_second_attempt(db_session):
     repository.create(job)
     repository.commit()
 
-    first_claim = repository.claim_job(job.id)
+    first_claim = repository.claim_job(job_id=job.id, worker_id="worker-1")
     repository.commit()
 
-    second_claim = repository.claim_job(job.id)
+    second_claim = repository.claim_job(job_id=job.id, worker_id="worker-2")
 
     assert first_claim is not None
     assert first_claim.status == JobStatus.PROCESSING
@@ -292,7 +299,7 @@ def test_claim_job_returns_none_when_retry_is_not_due(db_session):
     repository.save(job)
     repository.commit()
 
-    claimed_job = repository.claim_job(job.id)
+    claimed_job = repository.claim_job(job_id=job.id, worker_id="worker-1")
 
     assert claimed_job is None
 
@@ -324,7 +331,7 @@ def test_claim_job_succeeds_when_retry_is_due(db_session):
     repository.save(job)
     repository.commit()
 
-    claimed_job = repository.claim_job(job.id)
+    claimed_job = repository.claim_job(job_id=job.id, worker_id="worker-1")
 
     assert claimed_job is not None
     assert claimed_job.status == JobStatus.PROCESSING
@@ -352,6 +359,267 @@ def test_claim_next_job_skips_jobs_with_future_retry(db_session):
     repository.save(job)
     repository.commit()
 
-    claimed_job = repository.claim_next_job()
+    claimed_job = repository.claim_next_job(worker_id="worker-2")
 
     assert claimed_job is None
+
+
+def test_recover_expired_job(db_session):
+    repository = PostgresJobRepository(db_session)
+
+    job = Job(
+        task_type="send_email",
+        payload={"email": "test@example.com"},
+        max_attempts=3,
+    )
+
+    repository.create(job)
+
+    # Simulate a worker that claimed the job but whose lease expired.
+    job_model = db_session.get(
+        __import__("app.models.job_model", fromlist=["JobModel"]).JobModel,
+        job.id,
+    )
+    job_model.status = JobStatus.PROCESSING.value
+    job_model.attempts = 1
+    job_model.lease_owner = "worker-1"
+    job_model.lease_expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+    job_model.lease_version = 1
+    repository.commit()
+
+    recovered_jobs = repository.recover_expired_jobs(
+        worker_id="worker-2",
+    )
+
+    assert len(recovered_jobs) == 1
+
+    recovered_job = recovered_jobs[0]
+    assert recovered_job.id == job.id
+    assert recovered_job.status == JobStatus.PROCESSING
+    assert recovered_job.attempts == 2
+    assert recovered_job.lease_owner == "worker-2"
+    assert recovered_job.lease_expires_at is not None
+    assert recovered_job.lease_expires_at > datetime.now(timezone.utc)
+    assert recovered_job.lease_version == 2
+
+
+def test_recover_expired_jobs_returns_empty_when_none_expired(db_session):
+    repository = PostgresJobRepository(db_session)
+
+    job = Job(task_type="send_email", payload={"email": "test@example.com"})
+    repository.create(job)
+
+    job_model = db_session.get(JobModel, job.id)
+    job_model.status = JobStatus.PROCESSING.value
+    job_model.attempts = 1
+    job_model.lease_owner = "worker-1"
+    job_model.lease_expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+    repository.commit()
+
+    recovered_jobs = repository.recover_expired_jobs(
+        worker_id="worker-2",
+    )
+
+    assert recovered_jobs == []
+
+
+def test_recover_expired_job_marks_failed_when_attempts_exhausted(db_session):
+    repository = PostgresJobRepository(db_session)
+
+    job = Job(
+        task_type="send_email",
+        payload={"email": "test@example.com"},
+        max_attempts=2,
+    )
+    repository.create(job)
+
+    job_model = db_session.get(JobModel, job.id)
+    job_model.status = JobStatus.PROCESSING.value
+    job_model.attempts = 2
+    job_model.lease_owner = "worker-1"
+    job_model.lease_expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+    job_model.lease_version = 1
+    repository.commit()
+
+    recovered_jobs = repository.recover_expired_jobs(
+        worker_id="worker-2",
+    )
+
+    assert recovered_jobs == []
+
+    failed_job = repository.get_by_id(job.id)
+    assert failed_job is not None
+    assert failed_job.status == JobStatus.FAILED
+    assert failed_job.attempts == 2
+    assert failed_job.lease_owner is None
+    assert failed_job.lease_expires_at is None
+    assert failed_job.last_error is not None
+
+
+def test_recover_expired_jobs_respects_batch_size(db_session):
+    repository = PostgresJobRepository(db_session)
+
+    jobs = [
+        Job(task_type="send_email", payload={"email": f"{i}@example.com"})
+        for i in range(3)
+    ]
+
+    for job in jobs:
+        repository.create(job)
+        job_model = db_session.get(JobModel, job.id)
+        job_model.status = JobStatus.PROCESSING.value
+        job_model.attempts = 1
+        job_model.lease_owner = "worker-1"
+        job_model.lease_expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+
+    repository.commit()
+
+    recovered_jobs = repository.recover_expired_jobs(
+        worker_id="worker-2",
+        batch_size=2,
+    )
+
+    assert len(recovered_jobs) == 2
+
+
+def test_recover_expired_jobs_increments_fencing_token(db_session):
+    repository = PostgresJobRepository(db_session)
+
+    job = Job(task_type="send_email", payload={"email": "test@example.com"})
+    repository.create(job)
+
+    job_model = db_session.get(JobModel, job.id)
+    job_model.status = JobStatus.PROCESSING.value
+    job_model.attempts = 1
+    job_model.lease_owner = "worker-1"
+    job_model.lease_expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+    job_model.lease_version = 7
+    repository.commit()
+
+    recovered_jobs = repository.recover_expired_jobs(
+        worker_id="worker-2",
+    )
+
+    assert recovered_jobs[0].lease_version == 8
+
+
+def test_recover_expired_jobs_rejects_invalid_arguments(db_session):
+    repository = PostgresJobRepository(db_session)
+
+    with pytest.raises(ValueError, match="worker_id"):
+        repository.recover_expired_jobs(worker_id=" ")
+
+    with pytest.raises(ValueError, match="lease_duration_seconds"):
+        repository.recover_expired_jobs(
+            worker_id="worker-1",
+            lease_duration_seconds=0,
+        )
+
+    with pytest.raises(ValueError, match="batch_size"):
+        repository.recover_expired_jobs(
+            worker_id="worker-1",
+            batch_size=0,
+        )
+
+
+def test_complete_job_with_valid_lease(db_session):
+    repository = PostgresJobRepository(db_session)
+
+    job = Job(task_type="send_email", payload={"email": "test@example.com"})
+    repository.create(job)
+    repository.commit()
+
+    claimed_job = repository.claim_job(job.id, "worker-1")
+    assert claimed_job is not None
+    repository.commit()
+
+    completed_job = repository.complete_job(
+        job_id=job.id,
+        worker_id="worker-1",
+        lease_version=claimed_job.lease_version,
+    )
+
+    assert completed_job is not None
+    assert completed_job.status == JobStatus.COMPLETED
+    assert completed_job.lease_owner is None
+    assert completed_job.lease_expires_at is None
+
+
+def test_complete_job_rejects_wrong_worker(db_session):
+    repository = PostgresJobRepository(db_session)
+
+    job = Job(task_type="send_email", payload={})
+    repository.create(job)
+    repository.commit()
+
+    repository.claim_job(job.id, "worker-1")
+    repository.commit()
+
+    result = repository.complete_job(job.id, "worker-2", 1)
+
+    assert result is None
+
+
+def test_complete_job_rejects_expired_lease(db_session):
+    repository = PostgresJobRepository(db_session)
+
+    job = Job(task_type="send_email", payload={})
+    repository.create(job)
+    repository.commit()
+
+    repository.claim_job(job.id, "worker-1")
+    repository.commit()
+
+    job_model = db_session.get(JobModel, job.id)
+    job_model.lease_expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+    repository.commit()
+
+    result = repository.complete_job(job.id, "worker-1", 1)
+
+    assert result is None
+
+
+def test_complete_job_rejects_old_fencing_token(db_session):
+    repository = PostgresJobRepository(db_session)
+
+    job = Job(task_type="send_email", payload={})
+    repository.create(job)
+    repository.commit()
+
+    # First worker acquires lease with fencing token 1.
+    first_claim = repository.claim_job(job.id, "worker-1")
+    repository.commit()
+
+    assert first_claim is not None
+
+    repository.commit()
+
+    assert first_claim.lease_version == 1
+
+    # Simulate lease expiration and recovery by another worker.
+    db_session.query(JobModel).filter(JobModel.id == job.id).update(
+        {JobModel.lease_expires_at: datetime.now(timezone.utc) - timedelta(seconds=10)}
+    )
+    repository.commit()
+
+    second_claim = repository.recover_expired_jobs(worker_id="worker-2")
+    repository.commit()
+
+    assert len(second_claim) == 1
+    assert second_claim[0].lease_version == 2
+
+    # The old worker must not complete using its previous token.
+    result = repository.complete_job(
+        job.id,
+        "worker-1",
+        first_claim.lease_version,
+    )
+
+    assert result is None
+
+    current_job = repository.get_by_id(job.id)
+    assert current_job is not None
+
+    assert current_job.status == JobStatus.PROCESSING
+    assert current_job.lease_owner == "worker-2"
+    assert current_job.lease_version == 2

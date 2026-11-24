@@ -32,3 +32,17 @@ class JobModel(Base):
         Text,
         nullable=True,
     )
+    lease_owner: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+    )
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    lease_version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )

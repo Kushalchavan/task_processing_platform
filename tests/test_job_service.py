@@ -1,3 +1,5 @@
+import pytest
+
 from unittest.mock import Mock
 
 from datetime import datetime, timedelta, timezone
@@ -67,11 +69,15 @@ def test_claim_job():
         {"message": "Hello"},
     )
 
-    claimed_job = service.claim_job(job.id)
+    claimed_job = service.claim_job(job_id=job.id, worker_id="worker-test")
 
     assert claimed_job is not None
     assert claimed_job.status == JobStatus.PROCESSING
     assert claimed_job.attempts == 1
+    assert claimed_job.lease_owner == "worker-test"
+    assert claimed_job.lease_expires_at is not None
+    assert claimed_job.lease_expires_at > datetime.now(timezone.utc)
+    assert claimed_job.lease_version == 1
 
 
 def test_schedule_job_retry_first_attempt():
@@ -80,7 +86,7 @@ def test_schedule_job_retry_first_attempt():
     service = JobService(repository, redis_stream)
 
     job = service.create_job("email", {})
-    service.claim_job(job.id)
+    service.claim_job(job_id=job.id, worker_id="worker-test")
 
     before = datetime.now(timezone.utc)
 
@@ -114,10 +120,10 @@ def test_schedule_job_retry_second_attempt():
     job = service.create_job("email", {})
 
     # Simulate two failed execution attempts.
-    service.claim_job(job.id)
+    service.claim_job(job_id=job.id, worker_id="worker-test")
     service.schedule_job_retry(job.id, "First failure")
 
-    service.claim_job(job.id)
+    service.claim_job(job_id=job.id, worker_id="worker-test")
 
     before = datetime.now(timezone.utc)
 
@@ -154,7 +160,7 @@ def test_schedule_job_retry_max_attempts_reached():
     )
     repository.create(job)
 
-    service.claim_job(job.id)
+    service.claim_job(job_id=job.id, worker_id="worker-test")
 
     updated_job, should_retry = service.schedule_job_retry(
         job.id,
@@ -181,3 +187,62 @@ def test_schedule_retry_for_nonexistent_job():
         assert False, "Expected KeyError"
     except KeyError:
         pass
+
+
+def test_recover_expired_jobs():
+    repository = JobRepository()
+    redis_stream = Mock(spec=RedisStream)
+    service = JobService(repository, redis_stream)
+
+    job = Job(
+        task_type="send_email",
+        payload={"email": "test@example.com"},
+    )
+
+    repository.create(job)
+
+    # Simulate the repository returning a recovered job.
+    repository.recover_expired_jobs = Mock(return_value=[job])
+
+    recovered_jobs = service.recover_expired_jobs(
+        worker_id="worker-2",
+        lease_duration_seconds=90,
+        batch_size=5,
+    )
+
+    assert recovered_jobs == [job]
+
+    repository.recover_expired_jobs.assert_called_once_with(
+        worker_id="worker-2",
+        lease_duration_seconds=90,
+        batch_size=5,
+    )
+
+
+def test_recover_expired_jobs_returns_empty_list():
+    repository = JobRepository()
+    redis_stream = Mock(spec=RedisStream)
+    service = JobService(repository, redis_stream)
+
+    repository.recover_expired_jobs = Mock(return_value=[])
+
+    recovered_jobs = service.recover_expired_jobs(
+        worker_id="worker-2",
+    )
+
+    assert recovered_jobs == []
+
+
+def test_recover_expired_jobs_rolls_back_on_error():
+    repository = JobRepository()
+    redis_stream = Mock(spec=RedisStream)
+    service = JobService(repository, redis_stream)
+
+    repository.recover_expired_jobs = Mock(side_effect=RuntimeError("Database error"))
+
+    repository.rollback = Mock()
+
+    with pytest.raises(RuntimeError, match="Database error"):
+        service.recover_expired_jobs(worker_id="worker-2")
+
+    repository.rollback.assert_called_once()

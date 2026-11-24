@@ -1,5 +1,6 @@
 import logging
 import threading
+import time
 
 from app.services.job_service import JobService
 from app.workers.task_registry import TaskHandlerRegistry
@@ -17,6 +18,8 @@ class Worker:
         redis_stream: RedisStream,
         consumer_name: str,
         recovery_idle_time_ms: int = 60000,
+        recovery_interval_seconds: int = 30,
+        recovery_batch_size: int = 10,
     ) -> None:
         self.job_service = job_service
         self.task_registry = task_registry
@@ -24,6 +27,17 @@ class Worker:
         self.consumer_name = consumer_name
         self.shutdown_event = threading.Event()
         self.recovery_idle_time_ms = recovery_idle_time_ms
+        self.recovery_interval_seconds = recovery_interval_seconds
+        self.recovery_batch_size = recovery_batch_size
+
+        if recovery_idle_time_ms < 0:
+            raise ValueError("recovery_idle_time_ms cannot be negative")
+
+        if recovery_interval_seconds <= 0:
+            raise ValueError("recovery_interval_seconds must be positive")
+
+        if recovery_batch_size <= 0:
+            raise ValueError("recovery_batch_size must be positive")
 
     def _handle_unclaimable_message(
         self,
@@ -93,7 +107,7 @@ class Worker:
         message_id = message["message_id"]
         job_id = message["job_id"]
 
-        job = self.job_service.claim_job(job_id)
+        job = self.job_service.claim_job(job_id=job_id, worker_id=self.consumer_name)
 
         if job is None:
             self._handle_unclaimable_message(
@@ -149,12 +163,38 @@ class Worker:
         self.redis_stream.acknowledge_job(message_id)
         return True
 
+    def recover_expired_jobs(self) -> int:
+        """Recover jobs abandoned by workers with expired leases."""
+
+        recovered_jobs = self.job_service.recover_expired_jobs(
+            worker_id=self.consumer_name,
+            batch_size=self.recovery_batch_size,
+        )
+
+        if recovered_jobs:
+            logger.info(
+                "Recovered %d expired jobs for worker %s",
+                len(recovered_jobs),
+                self.consumer_name,
+            )
+
+        return len(recovered_jobs)
+
     def run(self) -> None:
         logger.info("Worker started: %s", self.consumer_name)
 
+        next_recovery_at = 0.0
+
         while not self.shutdown_event.is_set():
             try:
+                current_time = time.monotonic()
+
+                if current_time >= next_recovery_at:
+                    self.recover_expired_jobs()
+                    next_recovery_at = time.monotonic() + self.recovery_interval_seconds
+
                 self.process_one_job()
+
             except Exception:
                 logger.exception("Unexpected worker error")
 

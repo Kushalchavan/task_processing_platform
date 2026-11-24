@@ -1,5 +1,5 @@
 from sqlalchemy.orm import Session
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, update
 
 from app.domain.job import Job, JobStatus
 from app.models.job_model import JobModel
@@ -21,6 +21,9 @@ class PostgresJobRepository:
             max_attempts=job_model.max_attempts,
             next_retry_at=job_model.next_retry_at,
             last_error=job_model.last_error,
+            lease_owner=job_model.lease_owner,
+            lease_expires_at=job_model.lease_expires_at,
+            lease_version=job_model.lease_version,
         )
 
     def create(self, job: Job) -> Job:
@@ -33,6 +36,9 @@ class PostgresJobRepository:
             max_attempts=job.max_attempts,
             next_retry_at=job.next_retry_at,
             last_error=job.last_error,
+            lease_owner=job.lease_owner,
+            lease_expires_at=job.lease_expires_at,
+            lease_version=job.lease_version,
         )
 
         self.db.add(job_model)
@@ -66,12 +72,26 @@ class PostgresJobRepository:
         job_model.max_attempts = job.max_attempts
         job_model.next_retry_at = job.next_retry_at
         job_model.last_error = job.last_error
+        job_model.lease_owner = job.lease_owner
+        job_model.lease_expires_at = job.lease_expires_at
+        job_model.lease_version = job.lease_version
 
         self.db.flush()
 
         return job
 
-    def claim_next_job(self) -> Job | None:
+    def claim_next_job(
+        self,
+        worker_id: str,
+        lease_duration_seconds: int = 60,
+    ) -> Job | None:
+
+        if not worker_id.strip():
+            raise ValueError("worker_id cannot be empty")
+
+        if lease_duration_seconds <= 0:
+            raise ValueError("lease_duration_seconds must be positive")
+
         job_model = (
             self.db.query(JobModel)
             .filter(
@@ -91,15 +111,31 @@ class PostgresJobRepository:
 
         job_model.status = JobStatus.PROCESSING.value
         job_model.attempts += 1
-
-        # The retry is now being executed, so it is no longer scheduled.
         job_model.next_retry_at = None
+
+        job_model.lease_owner = worker_id
+        job_model.lease_expires_at = func.now() + func.make_interval(
+            0, 0, 0, 0, 0, 0, lease_duration_seconds
+        )
+        job_model.lease_version += 1
 
         self.db.flush()
 
         return self._to_domain(job_model)
 
-    def claim_job(self, job_id: str) -> Job | None:
+    def claim_job(
+        self,
+        job_id: str,
+        worker_id: str,
+        lease_duration_seconds: int = 60,
+    ) -> Job | None:
+
+        if not worker_id.strip():
+            raise ValueError("worker_id cannot be empty")
+
+        if lease_duration_seconds <= 0:
+            raise ValueError("lease_duration_seconds must be positive")
+
         job_model = (
             self.db.query(JobModel)
             .filter(
@@ -119,13 +155,123 @@ class PostgresJobRepository:
 
         job_model.status = JobStatus.PROCESSING.value
         job_model.attempts += 1
-
-        # clear the scheduled retry timestamp once the job is claimed
         job_model.next_retry_at = None
+
+        # Assign temporary ownership to this worker.
+        job_model.lease_owner = worker_id
+        job_model.lease_expires_at = func.now() + func.make_interval(
+            0, 0, 0, 0, 0, 0, lease_duration_seconds
+        )
+
+        # Increment the fencing token for this ownership generation.
+        job_model.lease_version += 1
 
         self.db.flush()
 
         return self._to_domain(job_model)
+
+    def recover_expired_jobs(
+        self,
+        worker_id: str,
+        lease_duration_seconds: int = 60,
+        batch_size: int = 10,
+    ) -> list[Job]:
+        """Reclaim jobs whose processing leases have expired."""
+
+        if not worker_id.strip():
+            raise ValueError("worker_id cannot be empty")
+
+        if lease_duration_seconds <= 0:
+            raise ValueError("lease_duration_seconds must be positive")
+
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+
+        expired_jobs = (
+            self.db.query(JobModel)
+            .filter(
+                JobModel.status == JobStatus.PROCESSING.value,
+                or_(
+                    JobModel.lease_expires_at.is_(None),
+                    JobModel.lease_expires_at <= func.now(),
+                ),
+            )
+            .order_by(JobModel.lease_expires_at, JobModel.id)
+            .with_for_update(skip_locked=True)
+            .limit(batch_size)
+            .all()
+        )
+
+        recovered_job_models = []
+
+        for job_model in expired_jobs:
+
+            if job_model.attempts >= job_model.max_attempts:
+                job_model.status = JobStatus.FAILED.value
+                job_model.last_error = "Maximum attempts reached after lease expiration"
+                job_model.lease_owner = None
+                job_model.lease_expires_at = None
+                continue
+
+            job_model.attempts += 1
+            job_model.lease_owner = worker_id
+
+            job_model.lease_expires_at = func.now() + func.make_interval(
+                0, 0, 0, 0, 0, 0, lease_duration_seconds
+            )
+
+            job_model.lease_version += 1
+
+            recovered_job_models.append(job_model)
+
+        # Execute the SQL expressions before converting models to domain objects.
+        self.db.flush()
+
+        return [self._to_domain(job_model) for job_model in recovered_job_models]
+
+    def complete_job(
+        self,
+        job_id: str,
+        worker_id: str,
+        lease_version: int,
+    ) -> Job | None:
+        """
+        Complete a job only if the worker still owns its active lease.
+
+        The ownership and fencing-token checks happen atomically
+        with the database update.
+        """
+
+        if not worker_id.strip():
+            raise ValueError("worker_id cannot be empty")
+
+        if lease_version < 1:
+            raise ValueError("lease_version must be positive")
+
+        statement = (
+            update(JobModel)
+            .where(
+                JobModel.id == job_id,
+                JobModel.status == JobStatus.PROCESSING.value,
+                JobModel.lease_owner == worker_id,
+                JobModel.lease_version == lease_version,
+                JobModel.lease_expires_at > func.now(),
+            )
+            .values(
+                status=JobStatus.COMPLETED.value,
+                lease_owner=None,
+                lease_expires_at=None,
+            )
+            .returning(JobModel.id)
+        )
+
+        completed_job_id = self.db.execute(statement).scalar_one_or_none()
+
+        if completed_job_id is None:
+            return None
+
+        self.db.expire_all()
+        return self.get_by_id(completed_job_id)
 
     def commit(self) -> None:
         self.db.commit()

@@ -63,7 +63,9 @@ def test_process_one_job_successfully():
 
     assert result is True
 
-    job_service.claim_job.assert_called_once_with(job.id)
+    job_service.claim_job.assert_called_once_with(
+        job_id=job.id, worker_id="worker-test"
+    )
     task_registry.get_handler.assert_called_once_with("print_message")
     handler.assert_called_once_with({"message": "Hello Nexus!"})
 
@@ -146,8 +148,9 @@ def test_worker_stops_when_shutdown_requested():
 
 
 def test_worker_wakes_up_when_shutdown_requested():
-    worker, _, _, redis_stream = create_worker()
+    worker, job_service, _, redis_stream = create_worker()
 
+    job_service.recover_expired_jobs.return_value = []
     redis_stream.consume_one.return_value = None
 
     # Request shutdown shortly after the worker starts.

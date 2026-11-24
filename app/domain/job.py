@@ -35,6 +35,13 @@ class Job:
     next_retry_at: datetime | None = None
     last_error: str | None = None
 
+    # Temporary ownership info for crach recovery
+    lease_owner: str | None = None
+    lease_expires_at: datetime | None = None
+
+    # Prevents an old worker from updating a reclaimed job.
+    lease_version: int = 0
+
     def __post_init__(self) -> None:
         if self.max_attempts < 1:
             raise ValueError("max_attempts must be at least 1")
