@@ -1,5 +1,7 @@
 from sqlalchemy.orm import Session
-from sqlalchemy import func, or_, update
+from sqlalchemy import func, or_, update, case
+
+from datetime import datetime
 
 from app.domain.job import Job, JobStatus
 from app.models.job_model import JobModel
@@ -278,3 +280,71 @@ class PostgresJobRepository:
 
     def rollback(self) -> None:
         self.db.rollback()
+
+    def schedule_retry(
+        self,
+        job_id: str,
+        worker_id: str,
+        lease_version: int,
+        error: str,
+        retry_at: datetime,
+    ) -> tuple[Job, bool] | None:
+        """
+        Schedule a retry only if the worker still owns the active lease.
+
+        The ownership checks and retry state transition happen atomically.
+        """
+
+        if not worker_id.strip():
+            raise ValueError("worker_id cannot be empty")
+
+        if lease_version < 1:
+            raise ValueError("lease_version must be positive")
+
+        if retry_at.tzinfo is None or retry_at.utcoffset() is None:
+            raise ValueError("retry_at must be timezone-aware")
+
+        # Determine the next state using the current attempt count.
+        should_retry = JobModel.attempts < JobModel.max_attempts
+
+        statement = (
+            update(JobModel)
+            .where(
+                JobModel.id == job_id,
+                JobModel.status == JobStatus.PROCESSING.value,
+                JobModel.lease_owner == worker_id,
+                JobModel.lease_version == lease_version,
+                JobModel.lease_expires_at > func.now(),
+            )
+            .values(
+                status=case(
+                    (should_retry, JobStatus.PENDING.value),
+                    else_=JobStatus.FAILED.value,
+                ),
+                next_retry_at=case(
+                    (should_retry, retry_at),
+                    else_=None,
+                ),
+                last_error=error,
+                lease_owner=None,
+                lease_expires_at=None,
+            )
+            .returning(JobModel.id, JobModel.status)
+        )
+
+        result = self.db.execute(statement).one_or_none()
+
+        # No matching row means the worker no longer owns the job.
+        if result is None:
+            return None
+
+        updated_job_id, updated_status = result
+
+        self.db.expire_all()
+
+        updated_job = self.get_by_id(updated_job_id)
+
+        if updated_job is None:
+            return None
+
+        return updated_job, updated_status == JobStatus.PENDING.value

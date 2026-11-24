@@ -48,6 +48,7 @@ def test_process_one_job_successfully():
         task_type="print_message",
         payload={"message": "Hello Nexus!"},
     )
+    job.lease_version = 1
 
     redis_stream.consume_one.return_value = {
         "message_id": "123-0",
@@ -64,14 +65,16 @@ def test_process_one_job_successfully():
     assert result is True
 
     job_service.claim_job.assert_called_once_with(
-        job_id=job.id, worker_id="worker-test"
+        job_id=job.id,
+        worker_id="worker-test",
     )
     task_registry.get_handler.assert_called_once_with("print_message")
     handler.assert_called_once_with({"message": "Hello Nexus!"})
 
-    job_service.update_job_status.assert_called_once_with(
-        job.id,
-        JobStatus.COMPLETED,
+    job_service.complete_job.assert_called_once_with(
+        job_id=job.id,
+        worker_id="worker-test",
+        lease_version=1,
     )
 
     redis_stream.acknowledge_job.assert_called_once_with("123-0")
@@ -84,6 +87,7 @@ def test_process_one_job_schedules_retry_when_handler_fails():
         task_type="print_message",
         payload={"message": "Hello Nexus!"},
     )
+    job.lease_version = 1
 
     retry_at = datetime.now(timezone.utc) + timedelta(seconds=5)
     updated_job = Job(
@@ -108,14 +112,19 @@ def test_process_one_job_schedules_retry_when_handler_fails():
     result = worker.process_one_job()
 
     assert result is True
+
     job_service.schedule_job_retry.assert_called_once_with(
         job_id=job.id,
+        worker_id="worker-test",
+        lease_version=1,
         error="Invalid payload",
     )
+
     redis_stream.schedule_delayed_job.assert_called_once_with(
         job_id=job.id,
         retry_at=retry_at,
     )
+
     job_service.update_job_status.assert_not_called()
     redis_stream.acknowledge_job.assert_called_once_with("123-0")
 

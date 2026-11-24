@@ -1,7 +1,9 @@
 import logging
 import threading
 import time
+from unittest import result
 
+from app.domain import job
 from app.services.job_service import JobService
 from app.workers.task_registry import TaskHandlerRegistry
 from app.domain.job import JobStatus
@@ -107,7 +109,10 @@ class Worker:
         message_id = message["message_id"]
         job_id = message["job_id"]
 
-        job = self.job_service.claim_job(job_id=job_id, worker_id=self.consumer_name)
+        job = self.job_service.claim_job(
+            job_id=job_id,
+            worker_id=self.consumer_name,
+        )
 
         if job is None:
             self._handle_unclaimable_message(
@@ -123,18 +128,30 @@ class Worker:
         except Exception as error:
             logger.exception("Job execution failed: %s", job.id)
 
-            # Let JobService decide whether another attempt is allowed
-            # and calculate the next retry time.
-            updated_job, should_retry = self.job_service.schedule_job_retry(
+            # Schedule retry only if this worker still owns the lease.
+            result = self.job_service.schedule_job_retry(
                 job_id=job.id,
+                worker_id=self.consumer_name,
+                lease_version=job.lease_version,
                 error=str(error),
             )
 
+            # The lease may have expired or another worker may have
+            # reclaimed this job.
+            if result is None:
+                logger.warning(
+                    "Could not schedule retry because worker lost lease: %s",
+                    job.id,
+                )
+                return True
+
+            updated_job, should_retry = result
+
             if should_retry:
-                # Keep retries out of the main stream until their delay expires.
                 if updated_job.next_retry_at is None:
                     raise ValueError(f"Retry time missing for job {job.id}")
 
+                # Schedule the retry outside the main Redis stream.
                 self.redis_stream.schedule_delayed_job(
                     job_id=updated_job.id,
                     retry_at=updated_job.next_retry_at,
@@ -145,6 +162,7 @@ class Worker:
                     job.id,
                     updated_job.next_retry_at,
                 )
+
             else:
                 logger.warning(
                     "Job %s exhausted its retry attempts",
@@ -152,15 +170,26 @@ class Worker:
                 )
 
         else:
-            # Acknowledge only after the completion status is saved.
-            self.job_service.update_job_status(
-                job.id,
-                JobStatus.COMPLETED,
+            # Complete the job only if this worker still owns its lease.
+            completed_job = self.job_service.complete_job(
+                job_id=job.id,
+                worker_id=self.consumer_name,
+                lease_version=job.lease_version,
             )
 
-        # Acknowledge only after the outcome is persisted and,
-        # when applicable, the delayed retry is scheduled.
+            if completed_job is None:
+                logger.warning(
+                    "Could not complete job because worker lost lease: %s",
+                    job.id,
+                )
+                return True
+
+            logger.info("Job completed successfully: %s", job.id)
+
+        # Acknowledge only after the database outcome is persisted
+        # and any required delayed retry has been scheduled.
         self.redis_stream.acknowledge_job(message_id)
+
         return True
 
     def recover_expired_jobs(self) -> int:

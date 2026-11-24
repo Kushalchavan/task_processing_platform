@@ -1,4 +1,6 @@
+from datetime import datetime
 from typing import Protocol
+
 from app.domain.job import Job
 
 
@@ -29,3 +31,19 @@ class JobRepositoryInterface(Protocol):
         lease_duration_seconds: int = 60,
         batch_size: int = 10,
     ) -> list[Job]: ...
+
+    def complete_job(
+        self,
+        job_id: str,
+        worker_id: str,
+        lease_version: int,
+    ) -> Job | None: ...
+
+    def schedule_retry(
+        self,
+        job_id: str,
+        worker_id: str,
+        lease_version: int,
+        error: str,
+        retry_at: datetime,
+    ) -> tuple[Job, bool] | None: ...

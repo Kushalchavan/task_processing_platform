@@ -94,36 +94,41 @@ class JobService:
     def schedule_job_retry(
         self,
         job_id: str,
+        worker_id: str,
+        lease_version: int,
         error: str,
         base_delay_seconds: int = 5,
-    ):
+    ) -> tuple[Job, bool] | None:
+        """
+        Schedule a retry only if the worker still owns the active lease.
+        """
+
+        if base_delay_seconds <= 0:
+            raise ValueError("base_delay_seconds must be positive")
+
         try:
             job = self.job_repository.get_by_id(job_id)
 
             if job is None:
                 raise KeyError(f"Job not found: {job_id}")
 
-            # Exponential backoff: increase the delay after each failed attampt.
-            # Ex: 5s, 10s, 20s, 40s
+            # Exponential backoff: 5s, 10s, 20s, 40s...
             delay_seconds = base_delay_seconds * (2 ** (job.attempts - 1))
 
-            # Store the earliest time at which this job can be retried.
             retry_at = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
 
-            # The domain decides wheather another attempss is allowed.
-            should_retry = job.schedule_retry(
+            result = self.job_repository.schedule_retry(
+                job_id=job_id,
+                worker_id=worker_id,
+                lease_version=lease_version,
                 error=error,
                 retry_at=retry_at,
             )
 
-            # Persist the updated status, retry timestamp and erro details
-            updated_job = self.job_repository.save(job)
             self.job_repository.commit()
-
-            return updated_job, should_retry
+            return result
 
         except Exception:
-            # Roll back the transaction if retrieving or updating the job fails.
             self.job_repository.rollback()
             raise
 
@@ -142,6 +147,32 @@ class JobService:
 
             self.job_repository.commit()
             return recovered_jobs
+
+        except Exception:
+            self.job_repository.rollback()
+            raise
+
+    def complete_job(
+        self,
+        job_id: str,
+        worker_id: str,
+        lease_version: int,
+    ) -> Job | None:
+        """
+        Complete a job only when the worker still owns its active lease.
+
+        The repository performs the actual ownership and fencing checks.
+        """
+
+        try:
+            completed_job = self.job_repository.complete_job(
+                job_id=job_id,
+                worker_id=worker_id,
+                lease_version=lease_version,
+            )
+
+            self.job_repository.commit()
+            return completed_job
 
         except Exception:
             self.job_repository.rollback()

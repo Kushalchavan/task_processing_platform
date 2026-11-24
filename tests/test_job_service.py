@@ -1,7 +1,6 @@
 import pytest
 
 from unittest.mock import Mock
-
 from datetime import datetime, timedelta, timezone
 
 from app.queue.redis_stream import RedisStream
@@ -15,7 +14,10 @@ def test_create_job():
     redis_stream = Mock(spec=RedisStream)
     service = JobService(repository, redis_stream)
 
-    job = service.create_job(task_type="email", payload={"to": "test@example.com"})
+    job = service.create_job(
+        task_type="email",
+        payload={"to": "test@example.com"},
+    )
 
     assert job.task_type == "email"
     assert job.payload == {"to": "test@example.com"}
@@ -69,7 +71,10 @@ def test_claim_job():
         {"message": "Hello"},
     )
 
-    claimed_job = service.claim_job(job_id=job.id, worker_id="worker-test")
+    claimed_job = service.claim_job(
+        job_id=job.id,
+        worker_id="worker-test",
+    )
 
     assert claimed_job is not None
     assert claimed_job.status == JobStatus.PROCESSING
@@ -86,28 +91,37 @@ def test_schedule_job_retry_first_attempt():
     service = JobService(repository, redis_stream)
 
     job = service.create_job("email", {})
-    service.claim_job(job_id=job.id, worker_id="worker-test")
+
+    claimed_job = service.claim_job(
+        job_id=job.id,
+        worker_id="worker-test",
+    )
+    assert claimed_job is not None
 
     before = datetime.now(timezone.utc)
 
-    updated_job, should_retry = service.schedule_job_retry(
-        job.id,
+    result = service.schedule_job_retry(
+        job_id=job.id,
+        worker_id="worker-test",
+        lease_version=claimed_job.lease_version,
         error="Connection timeout",
     )
 
     after = datetime.now(timezone.utc)
 
-    # First failed attempt should schedule a retry after 5 seconds.
+    assert result is not None
+    updated_job, should_retry = result
+
     assert should_retry is True
     assert updated_job.status == JobStatus.PENDING
     assert updated_job.attempts == 1
     assert updated_job.last_error == "Connection timeout"
-    # A successful retry scheduling operation must set a retry timestamp.
     assert updated_job.next_retry_at is not None
+    assert updated_job.lease_owner is None
+    assert updated_job.lease_expires_at is None
 
     retry_at = updated_job.next_retry_at
 
-    # Verify that the retry timestamp is approximately 5 seconds in the future.
     assert before + timedelta(seconds=5) <= retry_at
     assert retry_at <= after + timedelta(seconds=5)
 
@@ -119,30 +133,51 @@ def test_schedule_job_retry_second_attempt():
 
     job = service.create_job("email", {})
 
-    # Simulate two failed execution attempts.
-    service.claim_job(job_id=job.id, worker_id="worker-test")
-    service.schedule_job_retry(job.id, "First failure")
+    first_claim = service.claim_job(
+        job_id=job.id,
+        worker_id="worker-test",
+    )
+    assert first_claim is not None
 
-    service.claim_job(job_id=job.id, worker_id="worker-test")
+    first_result = service.schedule_job_retry(
+        job_id=job.id,
+        worker_id="worker-test",
+        lease_version=first_claim.lease_version,
+        error="First failure",
+    )
+    assert first_result is not None
+
+    # Make the retry immediately eligible for the next test attempt.
+    job.next_retry_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+
+    second_claim = service.claim_job(
+        job_id=job.id,
+        worker_id="worker-test",
+    )
+    assert second_claim is not None
 
     before = datetime.now(timezone.utc)
 
-    updated_job, should_retry = service.schedule_job_retry(
-        job.id,
+    result = service.schedule_job_retry(
+        job_id=job.id,
+        worker_id="worker-test",
+        lease_version=second_claim.lease_version,
         error="Second failure",
     )
 
     after = datetime.now(timezone.utc)
 
-    # Second failed attempt should use a 10-second delay.
+    assert result is not None
+    updated_job, should_retry = result
+
     assert should_retry is True
     assert updated_job.attempts == 2
-    # A successful retry scheduling operation must set a retry timestamp.
     assert updated_job.next_retry_at is not None
+    assert updated_job.lease_owner is None
+    assert updated_job.lease_expires_at is None
 
     retry_at = updated_job.next_retry_at
 
-    # Verify that the retry timestamp is approximately 10 seconds in the future.
     assert before + timedelta(seconds=10) <= retry_at
     assert retry_at <= after + timedelta(seconds=10)
 
@@ -152,7 +187,6 @@ def test_schedule_job_retry_max_attempts_reached():
     redis_stream = Mock(spec=RedisStream)
     service = JobService(repository, redis_stream)
 
-    # Configure a job that is allowed only one attempt.
     job = Job(
         task_type="email",
         payload={},
@@ -160,17 +194,28 @@ def test_schedule_job_retry_max_attempts_reached():
     )
     repository.create(job)
 
-    service.claim_job(job_id=job.id, worker_id="worker-test")
+    claimed_job = service.claim_job(
+        job_id=job.id,
+        worker_id="worker-test",
+    )
+    assert claimed_job is not None
 
-    updated_job, should_retry = service.schedule_job_retry(
-        job.id,
+    result = service.schedule_job_retry(
+        job_id=job.id,
+        worker_id="worker-test",
+        lease_version=claimed_job.lease_version,
         error="Connection timeout",
     )
+
+    assert result is not None
+    updated_job, should_retry = result
 
     assert should_retry is False
     assert updated_job.status == JobStatus.FAILED
     assert updated_job.last_error == "Connection timeout"
     assert updated_job.next_retry_at is None
+    assert updated_job.lease_owner is None
+    assert updated_job.lease_expires_at is None
 
 
 def test_schedule_retry_for_nonexistent_job():
@@ -178,15 +223,13 @@ def test_schedule_retry_for_nonexistent_job():
     redis_stream = Mock(spec=RedisStream)
     service = JobService(repository, redis_stream)
 
-    # A retry request for an unknown job should fail clearly.
-    try:
+    with pytest.raises(KeyError, match="Job not found"):
         service.schedule_job_retry(
-            "invalid-job-id",
+            job_id="invalid-job-id",
+            worker_id="worker-test",
+            lease_version=1,
             error="Connection timeout",
         )
-        assert False, "Expected KeyError"
-    except KeyError:
-        pass
 
 
 def test_recover_expired_jobs():
@@ -201,7 +244,6 @@ def test_recover_expired_jobs():
 
     repository.create(job)
 
-    # Simulate the repository returning a recovered job.
     repository.recover_expired_jobs = Mock(return_value=[job])
 
     recovered_jobs = service.recover_expired_jobs(
@@ -246,3 +288,48 @@ def test_recover_expired_jobs_rolls_back_on_error():
         service.recover_expired_jobs(worker_id="worker-2")
 
     repository.rollback.assert_called_once()
+
+
+def test_complete_job():
+    repository = JobRepository()
+    redis_stream = Mock(spec=RedisStream)
+    service = JobService(repository, redis_stream)
+
+    job = Job(task_type="send_email", payload={})
+    repository.create(job)
+
+    claimed_job = repository.claim_job(job.id, "worker-1")
+    assert claimed_job is not None
+
+    result = service.complete_job(
+        job_id=job.id,
+        worker_id="worker-1",
+        lease_version=claimed_job.lease_version,
+    )
+
+    assert result is not None
+    assert result.status == JobStatus.COMPLETED
+    assert result.lease_owner is None
+    assert result.lease_expires_at is None
+
+
+def test_complete_job_rejects_wrong_worker():
+    repository = JobRepository()
+    redis_stream = Mock(spec=RedisStream)
+    service = JobService(repository, redis_stream)
+
+    job = Job(task_type="send_email", payload={})
+    repository.create(job)
+
+    claimed_job = repository.claim_job(job.id, "worker-1")
+    assert claimed_job is not None
+
+    result = service.complete_job(
+        job_id=job.id,
+        worker_id="worker-2",
+        lease_version=claimed_job.lease_version,
+    )
+
+    assert result is None
+    assert job.status == JobStatus.PROCESSING
+    assert job.lease_owner == "worker-1"

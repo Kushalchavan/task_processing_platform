@@ -153,3 +153,106 @@ class JobRepository:
             recovered_jobs.append(job)
 
         return recovered_jobs
+
+    def complete_job(
+        self,
+        job_id: str,
+        worker_id: str,
+        lease_version: int,
+    ) -> Job | None:
+        """
+        Complete a job only if the worker still owns its active lease.
+
+        The worker ID and fencing token prevent an old worker
+        from completing a job after another worker has reclaimed it.
+        """
+
+        if not worker_id.strip():
+            raise ValueError("worker_id cannot be empty")
+
+        if lease_version < 1:
+            raise ValueError("lease_version must be positive")
+
+        job = self.jobs.get(job_id)
+
+        if job is None:
+            return None
+
+        # Verify that the job is still being processed by this worker.
+        if job.status != JobStatus.PROCESSING:
+            return None
+
+        if job.lease_owner != worker_id:
+            return None
+
+        # Reject workers holding an outdated fencing token.
+        if job.lease_version != lease_version:
+            return None
+
+        # An expired lease cannot be used to complete a job.
+        if job.lease_expires_at is None:
+            return None
+
+        if job.lease_expires_at <= datetime.now(timezone.utc):
+            return None
+
+        job.update_status(JobStatus.COMPLETED)
+
+        # Release the lease after successful completion.
+        job.lease_owner = None
+        job.lease_expires_at = None
+
+        return job
+
+    def schedule_retry(
+        self,
+        job_id: str,
+        worker_id: str,
+        lease_version: int,
+        error: str,
+        retry_at: datetime,
+    ) -> tuple[Job, bool] | None:
+        """
+        Schedule a retry only when the worker owns the active lease.
+        """
+
+        if not worker_id.strip():
+            raise ValueError("worker_id cannot be empty")
+
+        if lease_version < 1:
+            raise ValueError("lease_version must be positive")
+
+        job = self.jobs.get(job_id)
+
+        if job is None:
+            return None
+
+        if job.status != JobStatus.PROCESSING:
+            return None
+
+        if job.lease_owner != worker_id:
+            return None
+
+        if job.lease_version != lease_version:
+            return None
+
+        if job.lease_expires_at is None:
+            return None
+
+        if job.lease_expires_at <= datetime.now(timezone.utc):
+            return None
+
+        if retry_at.tzinfo is None or retry_at.utcoffset() is None:
+            raise ValueError("retry_at must be timezone-aware")
+
+        # The domain model decides whether another attempt is allowed.
+        should_retry = job.schedule_retry(
+            error=error,
+            retry_at=retry_at,
+        )
+
+        # Release ownership regardless of whether the job will be retried.
+        job.lease_owner = None
+        job.lease_expires_at = None
+
+        return job, should_retry
