@@ -5,6 +5,7 @@ from datetime import datetime
 
 from app.domain.job import Job, JobStatus
 from app.models.job_model import JobModel
+from app.models.outbox_event_model import OutboxEventModel
 
 
 class PostgresJobRepository:
@@ -292,7 +293,8 @@ class PostgresJobRepository:
         """
         Schedule a retry only if the worker still owns the active lease.
 
-        The ownership checks and retry state transition happen atomically.
+        The job update and outbox event insertion happen
+        within the same database transaction.
         """
 
         if not worker_id.strip():
@@ -304,7 +306,7 @@ class PostgresJobRepository:
         if retry_at.tzinfo is None or retry_at.utcoffset() is None:
             raise ValueError("retry_at must be timezone-aware")
 
-        # Determine the next state using the current attempt count.
+        # Check whether another attempt is allowed.
         should_retry = JobModel.attempts < JobModel.max_attempts
 
         statement = (
@@ -334,11 +336,32 @@ class PostgresJobRepository:
 
         result = self.db.execute(statement).one_or_none()
 
-        # No matching row means the worker no longer owns the job.
+        # The worker no longer owns the job.
+        # Therefore, don't create an outbox event.
         if result is None:
             return None
 
         updated_job_id, updated_status = result
+
+        # Determine whether the job will be retried.
+        should_retry = updated_status == JobStatus.PENDING.value
+
+        # Create an outbox event only when a retry is scheduled.
+        if should_retry:
+            outbox_event = OutboxEventModel(
+                event_type="job.retry_scheduled",
+                aggregate_id=updated_job_id,
+                payload={
+                    "job_id": updated_job_id,
+                    "retry_at": retry_at.isoformat(),
+                },
+            )
+
+            self.db.add(outbox_event)
+
+        # Send pending SQL changes to PostgreSQL.
+        # This does NOT commit the transaction.
+        self.db.flush()
 
         self.db.expire_all()
 
@@ -347,4 +370,4 @@ class PostgresJobRepository:
         if updated_job is None:
             return None
 
-        return updated_job, updated_status == JobStatus.PENDING.value
+        return updated_job, should_retry

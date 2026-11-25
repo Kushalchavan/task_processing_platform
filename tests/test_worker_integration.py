@@ -227,3 +227,68 @@ def test_worker_retries_failed_job_successfully(db_session):
     assert completed_job.status == JobStatus.COMPLETED
     assert completed_job.attempts == 2
     assert execution_count == 2
+
+
+def test_worker_recovers_and_executes_expired_postgres_lease(db_session):
+    repository = PostgresJobRepository(db_session)
+    redis_stream = Mock(spec=RedisStream)
+    job_service = JobService(repository, redis_stream)
+
+    registry = TaskHandlerRegistry()
+
+    execution_count = 0
+
+    def recovery_handler(payload: dict) -> None:
+        nonlocal execution_count
+        execution_count += 1
+
+    registry.register("recovery_task", recovery_handler)
+
+    # Create a job in PostgreSQL.
+    job = job_service.create_job(
+        task_type="recovery_task",
+        payload={"message": "Recover this job"},
+    )
+
+    # Worker A claims the job but crashes before executing it.
+    claimed_job = job_service.claim_job(
+        job_id=str(job.id),
+        worker_id="worker-A",
+    )
+
+    assert claimed_job is not None
+    assert claimed_job.status == JobStatus.PROCESSING
+    assert claimed_job.lease_owner == "worker-A"
+    assert claimed_job.attempts == 1
+
+    # Simulate Worker A's lease expiring.
+    claimed_job.lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    repository.save(claimed_job)
+    repository.commit()
+
+    # Worker B recovers and executes the expired job.
+    worker_b = Worker(
+        job_service=job_service,
+        task_registry=registry,
+        redis_stream=redis_stream,
+        consumer_name="worker-B",
+    )
+
+    recovered_count = worker_b.recover_expired_jobs()
+
+    # Verify recovery and execution.
+    assert recovered_count == 1
+    assert execution_count == 1
+
+    completed_job = job_service.get_job(job.id)
+
+    assert completed_job is not None
+    assert completed_job.status == JobStatus.COMPLETED
+    assert completed_job.attempts == 2
+    assert completed_job.lease_owner is None
+    assert completed_job.lease_expires_at is None
+
+    # Recovery executes the already-claimed job directly.
+    # It does not consume or claim another Redis message.
+    redis_stream.consume_one.assert_not_called()
+    redis_stream.claim_one_pending.assert_not_called()
