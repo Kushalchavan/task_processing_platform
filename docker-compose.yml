@@ -11,6 +11,11 @@ services:
       - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   redis:
     image: redis:7-alpine
@@ -26,6 +31,69 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+
+  migrate:
+    image: nexus-api
+    build: .
+    container_name: nexus-migrate
+    command: alembic upgrade head
+    environment: &app-environment
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    image: nexus-api
+    container_name: nexus-api
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    environment: *app-environment
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    image: nexus-api
+    container_name: nexus-worker
+    command: python run_worker.py
+    environment: *app-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  delayed-dispatcher:
+    image: nexus-api
+    container_name: nexus-delayed-dispatcher
+    command: python run_dispatcher.py
+    environment: *app-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  outbox-dispatcher:
+    image: nexus-api
+    container_name: nexus-outbox-dispatcher
+    command: python run_outbox_dispatcher.py
+    environment: *app-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   postgres_data:
