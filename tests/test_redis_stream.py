@@ -6,18 +6,13 @@ from app.queue.redis_stream import RedisStream, STREAM_NAME, DELAYED_JOBS_KEY
 
 
 @pytest.fixture
-def redis_stream():
-    stream = RedisStream()
+def redis_stream(clean_test_redis):
+    stream = RedisStream(clean_test_redis)
 
-    # Clean both redis structures before each test.
-    stream.redis.delete(STREAM_NAME, DELAYED_JOBS_KEY)
-
+    # Start with a fresh stream and consumer group.
     stream.create_consumer_group()
 
     yield stream
-
-    # Prevent test data from leaking into subsequent tests
-    stream.redis.delete(STREAM_NAME)
 
 
 def test_publish_job(redis_stream):

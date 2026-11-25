@@ -102,10 +102,9 @@ def test_worker_schedules_retry_in_postgres_when_handler_fails(db_session):
     assert scheduled_job_id == job.id
 
 
-def test_worker_recovers_abandoned_pending_message(db_session):
+def test_worker_recovers_abandoned_pending_message(db_session, clean_test_redis):
     repository = PostgresJobRepository(db_session)
-
-    redis_stream = RedisStream()
+    redis_stream = RedisStream(clean_test_redis)
 
     # Start with a clean stream and create its consumer group.
     redis_stream.redis.delete(STREAM_NAME)
@@ -147,9 +146,9 @@ def test_worker_recovers_abandoned_pending_message(db_session):
     assert updated_job.attempts == 1
 
 
-def test_worker_retries_failed_job_successfully(db_session):
+def test_worker_retries_failed_job_successfully(db_session, clean_test_redis):
     repository = PostgresJobRepository(db_session)
-    redis_stream = RedisStream()
+    redis_stream = RedisStream(clean_test_redis)
 
     # Keep this test isolated from Redis data left by other tests.
     redis_stream.redis.delete(STREAM_NAME)

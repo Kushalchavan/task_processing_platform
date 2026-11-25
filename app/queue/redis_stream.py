@@ -9,8 +9,8 @@ DELAYED_JOBS_KEY = "nexus:delayed_jobs"
 
 
 class RedisStream:
-    def __init__(self) -> None:
-        self.redis = redis_client
+    def __init__(self, redis_client_override=None) -> None:
+        self.redis = redis_client_override or redis_client
 
     def create_consumer_group(self) -> None:
         try:
