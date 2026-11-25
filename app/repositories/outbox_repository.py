@@ -54,6 +54,41 @@ class OutboxRepository:
 
         return events
 
+    def renew_claim(
+        self,
+        event_id: str,
+        dispatcher_id: str,
+        claim_duration_seconds: int = 60,
+    ) -> bool:
+
+        if claim_duration_seconds <= 0:
+            raise ValueError("claim_duration_seconds must be positive")
+
+        current_time = datetime.now(timezone.utc)
+
+        new_expiration = current_time + timedelta(seconds=claim_duration_seconds)
+
+        event = (
+            self.db.query(OutboxEventModel)
+            .filter(
+                OutboxEventModel.id == event_id,
+                OutboxEventModel.claimed_by == dispatcher_id,
+                OutboxEventModel.published_at.is_(None),
+                OutboxEventModel.claim_expires_at > current_time,
+            )
+            .with_for_update()
+            .first()
+        )
+
+        if event is None:
+            return False
+
+        event.claim_expires_at = new_expiration
+
+        self.db.flush()
+
+        return True
+
     def mark_published(
         self,
         event_id: str,
@@ -106,7 +141,7 @@ class OutboxRepository:
             return False
 
         event.attempts += 1
-        event.last_error = error    
+        event.last_error = error
 
         self.db.flush()
 

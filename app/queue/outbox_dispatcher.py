@@ -75,25 +75,62 @@ class OutboxDispatcher:
         finally:
             db.close()
 
+    def renew_event_claim(self, event_id: str) -> bool:
+        db = SessionLocal()
+
+        try:
+            repository = OutboxRepository(db)
+
+            renewed = repository.renew_claim(
+                event_id=event_id,
+                dispatcher_id=self.dispatcher_id,
+                claim_duration_seconds=self.claim_duration_seconds,
+            )
+
+            db.commit()
+            return renewed
+
+        except Exception:
+            db.rollback()
+            logger.exception(
+                "Failed to renew outbox claim: %s",
+                event_id,
+            )
+            raise
+
+        finally:
+            db.close()
+
     def process_event(self, event: dict[str, Any]) -> None:
         event_id = event["id"]
 
         try:
+            # Step 1: Renew the claim before processing.
+            renewed = self.renew_event_claim(event_id)
+
+            if not renewed:
+                logger.warning(
+                    "Skipping outbox event %s: claim is no longer valid",
+                    event_id,
+                )
+                return
+
+            # Step 2: Extract and validate the event data.
+            if event["event_type"] != "job.retry_scheduled":
+                raise ValueError(f"Unsupported event type: {event['event_type']}")
+
             payload = event["payload"]
 
             job_id = payload["job_id"]
             retry_at = datetime.fromisoformat(payload["retry_at"])
 
-            if event["event_type"] != "job.retry_scheduled":
-                raise ValueError(f"Unsupported event type: {event['event_type']}")
-
-            # Publish the retry instruction to Redis.
+            # Step 3: Publish the retry instruction to Redis.
             self.redis_stream.schedule_delayed_job(
                 job_id=job_id,
                 retry_at=retry_at,
             )
 
-            # Redis accepted the event. Mark it as published.
+            # Step 4: Mark the event as published in PostgreSQL.
             db = SessionLocal()
 
             try:

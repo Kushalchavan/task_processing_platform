@@ -8,7 +8,6 @@ from app.queue.outbox_dispatcher import OutboxDispatcher
 
 
 def test_dispatcher_uses_custom_configuration():
-
     redis_stream = Mock(spec=RedisStream)
 
     dispatcher = OutboxDispatcher(
@@ -25,7 +24,6 @@ def test_dispatcher_uses_custom_configuration():
 
 
 def test_dispatcher_rejects_invalid_poll_interval():
-
     redis_stream = Mock(spec=RedisStream)
 
     with pytest.raises(ValueError, match="poll_interval"):
@@ -33,7 +31,6 @@ def test_dispatcher_rejects_invalid_poll_interval():
 
 
 def test_dispatcher_rejects_invalid_batch_size():
-
     redis_stream = Mock(spec=RedisStream)
 
     with pytest.raises(ValueError, match="batch_size"):
@@ -41,7 +38,6 @@ def test_dispatcher_rejects_invalid_batch_size():
 
 
 def test_dispatcher_rejects_invalid_claim_duration():
-
     redis_stream = Mock(spec=RedisStream)
 
     with pytest.raises(ValueError, match="claim_duration_seconds"):
@@ -123,10 +119,17 @@ def test_process_event_publishes_and_marks_event():
             db = session_factory.return_value
             repository = repository_class.return_value
             repository.mark_published.return_value = True
+            repository.renew_claim.return_value = True
 
             dispatcher = OutboxDispatcher(redis_stream=redis_stream)
 
             dispatcher.process_event(event)
+
+    repository.renew_claim.assert_called_once_with(
+        event_id="event-1",
+        dispatcher_id=dispatcher.dispatcher_id,
+        claim_duration_seconds=60,
+    )
 
     redis_stream.schedule_delayed_job.assert_called_once()
 
@@ -140,8 +143,8 @@ def test_process_event_publishes_and_marks_event():
         dispatcher_id=dispatcher.dispatcher_id,
     )
 
-    db.commit.assert_called_once()
-    db.close.assert_called_once()
+    assert db.commit.call_count == 2
+    assert db.close.call_count == 2
 
 
 def test_process_event_records_failure_when_redis_publish_fails():
@@ -156,16 +159,20 @@ def test_process_event_records_failure_when_redis_publish_fails():
     }
 
     redis_stream = Mock(spec=RedisStream)
+
     redis_stream.schedule_delayed_job.side_effect = RuntimeError("Redis unavailable")
 
     with patch("app.queue.outbox_dispatcher.SessionLocal") as session_factory:
         with patch("app.queue.outbox_dispatcher.OutboxRepository") as repository_class:
             db = session_factory.return_value
             repository = repository_class.return_value
+            repository.renew_claim.return_value = True
 
             dispatcher = OutboxDispatcher(redis_stream=redis_stream)
 
             dispatcher.process_event(event)
+
+    repository.renew_claim.assert_called_once()
 
     repository.mark_failed.assert_called_once()
 
@@ -176,8 +183,9 @@ def test_process_event_records_failure_when_redis_publish_fails():
     assert "Redis unavailable" in call_kwargs["error"]
 
     repository.mark_published.assert_not_called()
-    db.commit.assert_called_once()
-    db.close.assert_called_once()
+
+    assert db.commit.call_count == 2
+    assert db.close.call_count == 2
 
 
 def test_dispatch_once_processes_all_claimed_events():

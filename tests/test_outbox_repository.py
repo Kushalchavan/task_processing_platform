@@ -190,3 +190,94 @@ def test_mark_failed_rejects_wrong_dispatcher(db_session):
     assert event.attempts == 0
     assert event.last_error is None
     assert event.claimed_by == "dispatcher-1"
+
+
+def test_renew_claim_extends_expiration(db_session):
+    from datetime import datetime, timedelta, timezone
+
+    from app.repositories.outbox_repository import OutboxRepository
+    from app.models.outbox_event_model import OutboxEventModel
+
+    current_time = datetime.now(timezone.utc)
+
+    event = OutboxEventModel(
+        id="event-renew-1",
+        event_type="job.retry_scheduled",
+        aggregate_id="job-1",
+        payload={"job_id": "job-1"},
+        claimed_by="dispatcher-A",
+        claim_expires_at=current_time + timedelta(seconds=30),
+    )
+
+    db_session.add(event)
+    db_session.flush()
+
+    repository = OutboxRepository(db_session)
+
+    result = repository.renew_claim(
+        event_id="event-renew-1",
+        dispatcher_id="dispatcher-A",
+        claim_duration_seconds=60,
+    )
+
+    db_session.refresh(event)
+
+    assert result is True
+    assert event.claimed_by == "dispatcher-A"
+    assert event.claim_expires_at > current_time + timedelta(seconds=50)
+
+
+def test_renew_claim_rejects_wrong_dispatcher(db_session):
+    from datetime import datetime, timedelta, timezone
+
+    from app.models.outbox_event_model import OutboxEventModel
+    from app.repositories.outbox_repository import OutboxRepository
+
+    event = OutboxEventModel(
+        id="event-renew-2",
+        event_type="job.retry_scheduled",
+        aggregate_id="job-1",
+        payload={"job_id": "job-1"},
+        claimed_by="dispatcher-A",
+        claim_expires_at=datetime.now(timezone.utc) + timedelta(seconds=60),
+    )
+
+    db_session.add(event)
+    db_session.flush()
+
+    repository = OutboxRepository(db_session)
+
+    result = repository.renew_claim(
+        event_id="event-renew-2",
+        dispatcher_id="dispatcher-B",
+    )
+
+    assert result is False
+
+
+def test_renew_claim_rejects_expired_claim(db_session):
+    from datetime import datetime, timedelta, timezone
+
+    from app.models.outbox_event_model import OutboxEventModel
+    from app.repositories.outbox_repository import OutboxRepository
+
+    event = OutboxEventModel(
+        id="event-renew-3",
+        event_type="job.retry_scheduled",
+        aggregate_id="job-1",
+        payload={"job_id": "job-1"},
+        claimed_by="dispatcher-A",
+        claim_expires_at=datetime.now(timezone.utc) - timedelta(seconds=10),
+    )
+
+    db_session.add(event)
+    db_session.flush()
+
+    repository = OutboxRepository(db_session)
+
+    result = repository.renew_claim(
+        event_id="event-renew-3",
+        dispatcher_id="dispatcher-A",
+    )
+
+    assert result is False
