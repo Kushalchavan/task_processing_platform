@@ -1,10 +1,12 @@
 from typing import Any
 
 from datetime import datetime, timedelta, timezone
+from unittest import result
 
 from app.domain.job import create_job, JobStatus, Job
 from app.repositories.job_repository_interface import JobRepositoryInterface
 from app.queue.redis_stream import RedisStream
+from app.monitoring.metrics import JOBS_CREATED, JOBS_RETRIED
 
 
 class JobService:
@@ -30,6 +32,8 @@ class JobService:
 
         # Then publish its ID to Redis.
         self.redis_stream.publish_job(created_job.id)
+
+        JOBS_CREATED.labels(task_type=created_job.task_type).inc()
 
         return created_job
 
@@ -126,7 +130,14 @@ class JobService:
             )
 
             self.job_repository.commit()
-            return result
+
+            if result is not None:
+                updated_job, should_retry = result
+
+                if should_retry:
+                    JOBS_RETRIED.labels(task_type=updated_job.task_type).inc()
+
+                return result
 
         except Exception:
             self.job_repository.rollback()

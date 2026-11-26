@@ -9,6 +9,8 @@ from app.workers.task_handlers import handle_print_message
 from app.workers.worker import Worker
 from app.queue.redis_stream import RedisStream
 
+from prometheus_client import start_http_server
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -38,6 +40,10 @@ def main() -> None:
             redis_stream=redis_stream,
             consumer_name="worker-1",
         )
+
+        # Expose Prometheus metrics on port 8001
+        start_http_server(8001)
+        logger.info("Worker metrics server started on port 8001")
 
         def shutdown(signum, frame):
             logger.info("Shutdown signal received")
