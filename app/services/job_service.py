@@ -1,7 +1,6 @@
 from typing import Any
 
 from datetime import datetime, timedelta, timezone
-from unittest import result
 
 from app.domain.job import create_job, JobStatus, Job
 from app.repositories.job_repository_interface import JobRepositoryInterface

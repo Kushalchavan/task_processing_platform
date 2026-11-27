@@ -35,7 +35,7 @@ class Job:
     next_retry_at: datetime | None = None
     last_error: str | None = None
 
-    # Temporary ownership info for crach recovery
+    # Temporary ownership info for crash recovery
     lease_owner: str | None = None
     lease_expires_at: datetime | None = None
 
